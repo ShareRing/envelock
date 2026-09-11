@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.cache/
+Pods/
+Podfile.lock
+**/build/
+.gradle/
+.cxx/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/Flutter/ephemeral/
+.build/
+**/xcuserdata/
+DerivedData/
+.DS_Store
+*.log

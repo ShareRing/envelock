@@ -1,0 +1,37 @@
+name: envelock
+description: Encrypted local storage backed by the Secure Enclave and Android Keystore.
+version: 0.1.0
+homepage: https://github.com/ShareRing/envelock
+repository: https://github.com/ShareRing/envelock
+
+# envelock is published to ShareRing's private OnePub registry, not to pub.dev.
+#
+# This line is load-bearing: without it `flutter pub publish` targets public pub.dev, which for
+# a private package is an unrecoverable mistake - pub.dev versions cannot be deleted, only
+# retracted.
+publish_to: https://onepub.dev/api/jduspsdavu/
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  plugin_platform_interface: ^2.1.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  pigeon: ^22.4.0
+
+flutter:
+  plugin:
+    platforms:
+      ios:
+        pluginClass: EnvelockPlugin
+        sharedDarwinSource: false
+      android:
+        package: network.sharering.envelock.flutter
+        pluginClass: EnvelockPlugin

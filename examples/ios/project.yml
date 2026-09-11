@@ -1,0 +1,47 @@
+# XcodeGen spec for envelock's native iOS example.
+#
+# Generated rather than committed as a .xcodeproj: a pbxproj is 2000 lines of machine-managed
+# XML that no human should review in a diff.
+#
+#   brew install xcodegen && xcodegen
+#   open EnvelockDemo.xcodeproj
+name: EnvelockDemo
+options:
+  bundleIdPrefix: network.sharering.envelock
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+packages:
+  EnvelockCore:
+    path: ../..
+
+targets:
+  EnvelockDemo:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      # The BIP-39 wordlist the SDK demo draws its 12 words from, shared with the Android and
+      # React Native examples so there is exactly one copy of it.
+      - path: ../shared/bip39-english.json
+        buildPhase: resources
+    dependencies:
+      - package: EnvelockCore
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: envelock
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        # Required: unsealing the device secret raises the Face ID prompt, and iOS terminates
+        # any app that reaches for biometrics without declaring why.
+        NSFaceIDUsageDescription: envelock uses Face ID to unlock your encrypted data.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: network.sharering.envelock.demo
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGNING_ALLOWED: NO
