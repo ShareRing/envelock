@@ -15,9 +15,7 @@ android {
     compileSdk 35
 
     defaultConfig {
-        // API 23 is the floor: below it `setUserAuthenticationRequired` does not exist, so the
-        // spec 2.3 security floor could not be enforced at all.
-        minSdk 23
+        minSdk 28
         consumerProguardFiles "consumer-rules.pro"
     }
 
@@ -34,5 +32,5 @@ android {
 }
 
 dependencies {
-    implementation "network.sharering:envelock-android:0.1.0"
+    implementation "network.sharering:envelock-android:0.2.0"
 }

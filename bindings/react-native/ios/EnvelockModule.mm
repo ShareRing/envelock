@@ -11,54 +11,67 @@ RCT_EXTERN_METHOD(create:(NSDictionary *)config
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(destroyInstance:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(destroyInstance:(NSString *)vaultId
+                  resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(state:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(state:(NSString *)vaultId
+                  resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(enroll:(NSString *)kind
+RCT_EXTERN_METHOD(enroll:(NSString *)vaultId
+                  kind:(NSString *)kind
                   token:(nonnull NSNumber *)token
                   passphrase:(NSString *)passphrase
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(unlock:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(unlock:(NSString *)vaultId
+                  resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(unlockWithRecovery:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(unlockWithRecovery:(NSString *)vaultId
+                  resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(changeRecoveryFactor:(NSString *)kind
+RCT_EXTERN_METHOD(changeRecoveryFactor:(NSString *)vaultId
+                  kind:(NSString *)kind
                   token:(nonnull NSNumber *)token
                   passphrase:(NSString *)passphrase
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(put:(NSString *)recordId
+RCT_EXTERN_METHOD(put:(NSString *)vaultId
+                  recordId:(NSString *)recordId
                   token:(nonnull NSNumber *)token
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(get:(NSString *)recordId
+RCT_EXTERN_METHOD(get:(NSString *)vaultId
+                  recordId:(NSString *)recordId
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(remove:(NSString *)recordId
+RCT_EXTERN_METHOD(remove:(NSString *)vaultId
+                  recordId:(NSString *)recordId
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(list:(NSString *)prefix
+RCT_EXTERN_METHOD(list:(NSString *)vaultId
+                  prefix:(NSString *)prefix
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(lock:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(lock:(NSString *)vaultId
+                  resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(destroyVault:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(destroyVault:(NSString *)vaultId
+                  resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(securityInfo:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(securityInfo:(NSString *)vaultId
+                  resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
 // Synchronous on purpose: it only hands a value to a waiting semaphore and must not be

@@ -13,7 +13,7 @@ android {
 
     defaultConfig {
         applicationId = "network.sharering.envelock.demo"
-        minSdk = 23
+        minSdk = 28
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
@@ -49,7 +49,7 @@ android {
 dependencies {
     // By coordinates, not by project: this example is a consumer, and depending on the
     // published artifact is what makes it a real test of one.
-    implementation("network.sharering:envelock-android:0.1.0")
+    implementation("network.sharering:envelock-android:0.2.0")
 
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.2")

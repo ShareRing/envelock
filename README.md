@@ -31,12 +31,12 @@ generated bindings and the runnable examples; the core ships as a prebuilt binar
 
 ## Install
 
-Current release: **0.1.0**
+Current release: **0.2.0**
 
 ### Swift Package Manager
 
 ```swift
-.package(url: "https://github.com/ShareRing/envelock.git", from: "0.1.0")
+.package(url: "https://github.com/ShareRing/envelock.git", from: "0.2.0")
 ```
 
 ### CocoaPods
@@ -45,7 +45,7 @@ Current release: **0.1.0**
 the podspec is referenced by URL:
 
 ```ruby
-pod 'EnvelockCore', :podspec => 'https://github.com/ShareRing/envelock/releases/download/v0.1.0/EnvelockCore.podspec'
+pod 'EnvelockCore', :podspec => 'https://github.com/ShareRing/envelock/releases/download/v0.2.0/EnvelockCore.podspec'
 ```
 
 React Native and Flutter both depend on `EnvelockCore`, so that line belongs in the host app's
@@ -55,7 +55,7 @@ React Native and Flutter both depend on `EnvelockCore`, so that line belongs in 
 
 ```kotlin
 dependencies {
-    implementation("network.sharering:envelock-android:0.1.0")
+    implementation("network.sharering:envelock-android:0.2.0")
 }
 ```
 

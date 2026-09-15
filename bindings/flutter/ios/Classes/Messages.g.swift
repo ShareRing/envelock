@@ -100,7 +100,7 @@ enum WireVaultState: Int {
   case needsRecovery = 4
 }
 
-/// How a provider rejected (spec §7.4).
+/// How a provider rejected (spec 7.4).
 ///
 /// Only [denied] counts toward lockout. Anything unrecognised is treated as [unavailable]:
 /// retryable, because a flaky network must never march a legitimate user toward lockout.
@@ -157,6 +157,31 @@ struct WireVaultConfig {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct WireVaultHandle {
+  var vaultId: String
+  /// The resolved storage directory.
+  var directory: String
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> WireVaultHandle? {
+    let vaultId = pigeonVar_list[0] as! String
+    let directory = pigeonVar_list[1] as! String
+
+    return WireVaultHandle(
+      vaultId: vaultId,
+      directory: directory
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      vaultId,
+      directory,
+    ]
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct WireStateResult {
   var state: WireVaultState
   var lockedUntilMs: Int64? = nil
@@ -182,6 +207,7 @@ struct WireStateResult {
 
 /// Generated class from Pigeon that represents data sent in messages.
 struct WireMaterialContext {
+  var vaultId: String
   var requestId: String
   var reason: WireMaterialReason
   /// 32 fresh bytes for challenge-response with your own backend. envelock never inspects any
@@ -192,12 +218,14 @@ struct WireMaterialContext {
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
   static func fromList(_ pigeonVar_list: [Any?]) -> WireMaterialContext? {
-    let requestId = pigeonVar_list[0] as! String
-    let reason = pigeonVar_list[1] as! WireMaterialReason
-    let nonce = pigeonVar_list[2] as! FlutterStandardTypedData
-    let deadlineMs = pigeonVar_list[3] as! Int64
+    let vaultId = pigeonVar_list[0] as! String
+    let requestId = pigeonVar_list[1] as! String
+    let reason = pigeonVar_list[2] as! WireMaterialReason
+    let nonce = pigeonVar_list[3] as! FlutterStandardTypedData
+    let deadlineMs = pigeonVar_list[4] as! Int64
 
     return WireMaterialContext(
+      vaultId: vaultId,
       requestId: requestId,
       reason: reason,
       nonce: nonce,
@@ -206,6 +234,7 @@ struct WireMaterialContext {
   }
   func toList() -> [Any?] {
     return [
+      vaultId,
       requestId,
       reason,
       nonce,
@@ -254,9 +283,9 @@ struct WireKeyMaterial {
 ///
 /// Generated class from Pigeon that represents data sent in messages.
 struct WireRecoveryFactor {
-  /// 32 uniform bytes — a BIP-85 child key from the wallet seed, or equivalent.
+  /// 32 uniform bytes - a BIP-85 child key from the wallet seed, or equivalent.
   var highEntropyBytes: FlutterStandardTypedData? = nil
-  /// A user-chosen passphrase. **Not** the host app's PIN (spec §0).
+  /// A user-chosen passphrase. **Not** the host app's PIN (spec 0).
   var passphrase: String? = nil
 
 
@@ -280,7 +309,7 @@ struct WireRecoveryFactor {
 
 /// Generated class from Pigeon that represents data sent in messages.
 struct WireSecurityInfo {
-  /// Reported truthfully. `software` means the spec §2.3 security floor does not hold.
+  /// Reported truthfully. `software` means the spec 2.3 security floor does not hold.
   var hardwareBacking: WireHardwareBacking
   var providerId: String
   var keyId: String
@@ -417,16 +446,18 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 135:
       return WireVaultConfig.fromList(self.readValue() as! [Any?])
     case 136:
-      return WireStateResult.fromList(self.readValue() as! [Any?])
+      return WireVaultHandle.fromList(self.readValue() as! [Any?])
     case 137:
-      return WireMaterialContext.fromList(self.readValue() as! [Any?])
+      return WireStateResult.fromList(self.readValue() as! [Any?])
     case 138:
-      return WireKeyMaterial.fromList(self.readValue() as! [Any?])
+      return WireMaterialContext.fromList(self.readValue() as! [Any?])
     case 139:
-      return WireRecoveryFactor.fromList(self.readValue() as! [Any?])
+      return WireKeyMaterial.fromList(self.readValue() as! [Any?])
     case 140:
-      return WireSecurityInfo.fromList(self.readValue() as! [Any?])
+      return WireRecoveryFactor.fromList(self.readValue() as! [Any?])
     case 141:
+      return WireSecurityInfo.fromList(self.readValue() as! [Any?])
+    case 142:
       return WireSecurityEvent.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -457,23 +488,26 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? WireVaultConfig {
       super.writeByte(135)
       super.writeValue(value.toList())
-    } else if let value = value as? WireStateResult {
+    } else if let value = value as? WireVaultHandle {
       super.writeByte(136)
       super.writeValue(value.toList())
-    } else if let value = value as? WireMaterialContext {
+    } else if let value = value as? WireStateResult {
       super.writeByte(137)
       super.writeValue(value.toList())
-    } else if let value = value as? WireKeyMaterial {
+    } else if let value = value as? WireMaterialContext {
       super.writeByte(138)
       super.writeValue(value.toList())
-    } else if let value = value as? WireRecoveryFactor {
+    } else if let value = value as? WireKeyMaterial {
       super.writeByte(139)
       super.writeValue(value.toList())
-    } else if let value = value as? WireSecurityInfo {
+    } else if let value = value as? WireRecoveryFactor {
       super.writeByte(140)
       super.writeValue(value.toList())
-    } else if let value = value as? WireSecurityEvent {
+    } else if let value = value as? WireSecurityInfo {
       super.writeByte(141)
+      super.writeValue(value.toList())
+    } else if let value = value as? WireSecurityEvent {
+      super.writeByte(142)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -500,26 +534,26 @@ class MessagesPigeonCodec: FlutterStandardMessageCodec, @unchecked Sendable {
 ///
 /// Generated protocol from Pigeon that represents a handler of messages from Flutter.
 protocol EnvelockHostApi {
-  /// Create the vault. Returns the resolved storage directory.
-  func create(config: WireVaultConfig, completion: @escaping (Result<String, Error>) -> Void)
-  func dispose(completion: @escaping (Result<Void, Error>) -> Void)
-  func state(completion: @escaping (Result<WireStateResult, Error>) -> Void)
-  func enroll(factor: WireRecoveryFactor, completion: @escaping (Result<Void, Error>) -> Void)
-  /// Primary path: one OS biometric prompt, cached material, works offline (spec §8.2).
-  func unlock(completion: @escaping (Result<Void, Error>) -> Void)
+  /// Create a vault. Returns the id every later call uses to name it.
+  func create(config: WireVaultConfig, completion: @escaping (Result<WireVaultHandle, Error>) -> Void)
+  func dispose(vaultId: String, completion: @escaping (Result<Void, Error>) -> Void)
+  func state(vaultId: String, completion: @escaping (Result<WireStateResult, Error>) -> Void)
+  func enroll(vaultId: String, factor: WireRecoveryFactor, completion: @escaping (Result<Void, Error>) -> Void)
+  /// Primary path: one OS biometric prompt, cached material, works offline (spec 8.2).
+  func unlock(vaultId: String, completion: @escaping (Result<Void, Error>) -> Void)
   /// Recovery path. Provisions a fresh enclave key and rewraps the primary path in the same
-  /// operation, so the next unlock is biometric-only (spec §8.4).
-  func unlockWithRecovery(completion: @escaping (Result<Void, Error>) -> Void)
-  func changeRecoveryFactor(factor: WireRecoveryFactor, completion: @escaping (Result<Void, Error>) -> Void)
-  func put(recordId: String, value: FlutterStandardTypedData, completion: @escaping (Result<Void, Error>) -> Void)
-  func get(recordId: String, completion: @escaping (Result<FlutterStandardTypedData?, Error>) -> Void)
-  func delete(recordId: String, completion: @escaping (Result<Void, Error>) -> Void)
-  func list(prefix: String, completion: @escaping (Result<[String], Error>) -> Void)
-  /// Zeroize the in-memory DEK. Call from `AppLifecycleState.paused` (spec §11.3).
-  func lock(completion: @escaping (Result<Void, Error>) -> Void)
+  /// operation, so the next unlock is biometric-only (spec 8.4).
+  func unlockWithRecovery(vaultId: String, completion: @escaping (Result<Void, Error>) -> Void)
+  func changeRecoveryFactor(vaultId: String, factor: WireRecoveryFactor, completion: @escaping (Result<Void, Error>) -> Void)
+  func put(vaultId: String, recordId: String, value: FlutterStandardTypedData, completion: @escaping (Result<Void, Error>) -> Void)
+  func get(vaultId: String, recordId: String, completion: @escaping (Result<FlutterStandardTypedData?, Error>) -> Void)
+  func delete(vaultId: String, recordId: String, completion: @escaping (Result<Void, Error>) -> Void)
+  func list(vaultId: String, prefix: String, completion: @escaping (Result<[String], Error>) -> Void)
+  /// Zeroize the in-memory DEK. Call from `AppLifecycleState.paused` (spec 11.3).
+  func lock(vaultId: String, completion: @escaping (Result<Void, Error>) -> Void)
   /// Irreversible: deletes the enclave key, envelope, cache and every record.
-  func destroyVault(completion: @escaping (Result<Void, Error>) -> Void)
-  func securityInfo(completion: @escaping (Result<WireSecurityInfo, Error>) -> Void)
+  func destroyVault(vaultId: String, completion: @escaping (Result<Void, Error>) -> Void)
+  func securityInfo(vaultId: String, completion: @escaping (Result<WireSecurityInfo, Error>) -> Void)
   /// Hand a provider callback's outcome back to native code.
   ///
   /// Native invokes the Dart provider through [EnvelockFlutterApi] and blocks a background
@@ -533,7 +567,7 @@ class EnvelockHostApiSetup {
   /// Sets up an instance of `EnvelockHostApi` to handle messages through the `binaryMessenger`.
   static func setUp(binaryMessenger: FlutterBinaryMessenger, api: EnvelockHostApi?, messageChannelSuffix: String = "") {
     let channelSuffix = messageChannelSuffix.count > 0 ? ".\(messageChannelSuffix)" : ""
-    /// Create the vault. Returns the resolved storage directory.
+    /// Create a vault. Returns the id every later call uses to name it.
     let createChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.envelock.EnvelockHostApi.create\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       createChannel.setMessageHandler { message, reply in
@@ -553,8 +587,10 @@ class EnvelockHostApiSetup {
     }
     let disposeChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.envelock.EnvelockHostApi.dispose\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
-      disposeChannel.setMessageHandler { _, reply in
-        api.dispose { result in
+      disposeChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let vaultIdArg = args[0] as! String
+        api.dispose(vaultId: vaultIdArg) { result in
           switch result {
           case .success:
             reply(wrapResult(nil))
@@ -568,8 +604,10 @@ class EnvelockHostApiSetup {
     }
     let stateChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.envelock.EnvelockHostApi.state\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
-      stateChannel.setMessageHandler { _, reply in
-        api.state { result in
+      stateChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let vaultIdArg = args[0] as! String
+        api.state(vaultId: vaultIdArg) { result in
           switch result {
           case .success(let res):
             reply(wrapResult(res))
@@ -585,8 +623,9 @@ class EnvelockHostApiSetup {
     if let api = api {
       enrollChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
-        let factorArg = args[0] as! WireRecoveryFactor
-        api.enroll(factor: factorArg) { result in
+        let vaultIdArg = args[0] as! String
+        let factorArg = args[1] as! WireRecoveryFactor
+        api.enroll(vaultId: vaultIdArg, factor: factorArg) { result in
           switch result {
           case .success:
             reply(wrapResult(nil))
@@ -598,11 +637,13 @@ class EnvelockHostApiSetup {
     } else {
       enrollChannel.setMessageHandler(nil)
     }
-    /// Primary path: one OS biometric prompt, cached material, works offline (spec §8.2).
+    /// Primary path: one OS biometric prompt, cached material, works offline (spec 8.2).
     let unlockChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.envelock.EnvelockHostApi.unlock\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
-      unlockChannel.setMessageHandler { _, reply in
-        api.unlock { result in
+      unlockChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let vaultIdArg = args[0] as! String
+        api.unlock(vaultId: vaultIdArg) { result in
           switch result {
           case .success:
             reply(wrapResult(nil))
@@ -615,11 +656,13 @@ class EnvelockHostApiSetup {
       unlockChannel.setMessageHandler(nil)
     }
     /// Recovery path. Provisions a fresh enclave key and rewraps the primary path in the same
-    /// operation, so the next unlock is biometric-only (spec §8.4).
+    /// operation, so the next unlock is biometric-only (spec 8.4).
     let unlockWithRecoveryChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.envelock.EnvelockHostApi.unlockWithRecovery\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
-      unlockWithRecoveryChannel.setMessageHandler { _, reply in
-        api.unlockWithRecovery { result in
+      unlockWithRecoveryChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let vaultIdArg = args[0] as! String
+        api.unlockWithRecovery(vaultId: vaultIdArg) { result in
           switch result {
           case .success:
             reply(wrapResult(nil))
@@ -635,8 +678,9 @@ class EnvelockHostApiSetup {
     if let api = api {
       changeRecoveryFactorChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
-        let factorArg = args[0] as! WireRecoveryFactor
-        api.changeRecoveryFactor(factor: factorArg) { result in
+        let vaultIdArg = args[0] as! String
+        let factorArg = args[1] as! WireRecoveryFactor
+        api.changeRecoveryFactor(vaultId: vaultIdArg, factor: factorArg) { result in
           switch result {
           case .success:
             reply(wrapResult(nil))
@@ -652,9 +696,10 @@ class EnvelockHostApiSetup {
     if let api = api {
       putChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
-        let recordIdArg = args[0] as! String
-        let valueArg = args[1] as! FlutterStandardTypedData
-        api.put(recordId: recordIdArg, value: valueArg) { result in
+        let vaultIdArg = args[0] as! String
+        let recordIdArg = args[1] as! String
+        let valueArg = args[2] as! FlutterStandardTypedData
+        api.put(vaultId: vaultIdArg, recordId: recordIdArg, value: valueArg) { result in
           switch result {
           case .success:
             reply(wrapResult(nil))
@@ -670,8 +715,9 @@ class EnvelockHostApiSetup {
     if let api = api {
       getChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
-        let recordIdArg = args[0] as! String
-        api.get(recordId: recordIdArg) { result in
+        let vaultIdArg = args[0] as! String
+        let recordIdArg = args[1] as! String
+        api.get(vaultId: vaultIdArg, recordId: recordIdArg) { result in
           switch result {
           case .success(let res):
             reply(wrapResult(res))
@@ -687,8 +733,9 @@ class EnvelockHostApiSetup {
     if let api = api {
       deleteChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
-        let recordIdArg = args[0] as! String
-        api.delete(recordId: recordIdArg) { result in
+        let vaultIdArg = args[0] as! String
+        let recordIdArg = args[1] as! String
+        api.delete(vaultId: vaultIdArg, recordId: recordIdArg) { result in
           switch result {
           case .success:
             reply(wrapResult(nil))
@@ -704,8 +751,9 @@ class EnvelockHostApiSetup {
     if let api = api {
       listChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
-        let prefixArg = args[0] as! String
-        api.list(prefix: prefixArg) { result in
+        let vaultIdArg = args[0] as! String
+        let prefixArg = args[1] as! String
+        api.list(vaultId: vaultIdArg, prefix: prefixArg) { result in
           switch result {
           case .success(let res):
             reply(wrapResult(res))
@@ -717,11 +765,13 @@ class EnvelockHostApiSetup {
     } else {
       listChannel.setMessageHandler(nil)
     }
-    /// Zeroize the in-memory DEK. Call from `AppLifecycleState.paused` (spec §11.3).
+    /// Zeroize the in-memory DEK. Call from `AppLifecycleState.paused` (spec 11.3).
     let lockChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.envelock.EnvelockHostApi.lock\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
-      lockChannel.setMessageHandler { _, reply in
-        api.lock { result in
+      lockChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let vaultIdArg = args[0] as! String
+        api.lock(vaultId: vaultIdArg) { result in
           switch result {
           case .success:
             reply(wrapResult(nil))
@@ -736,8 +786,10 @@ class EnvelockHostApiSetup {
     /// Irreversible: deletes the enclave key, envelope, cache and every record.
     let destroyVaultChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.envelock.EnvelockHostApi.destroyVault\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
-      destroyVaultChannel.setMessageHandler { _, reply in
-        api.destroyVault { result in
+      destroyVaultChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let vaultIdArg = args[0] as! String
+        api.destroyVault(vaultId: vaultIdArg) { result in
           switch result {
           case .success:
             reply(wrapResult(nil))
@@ -751,8 +803,10 @@ class EnvelockHostApiSetup {
     }
     let securityInfoChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.envelock.EnvelockHostApi.securityInfo\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
-      securityInfoChannel.setMessageHandler { _, reply in
-        api.securityInfo { result in
+      securityInfoChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let vaultIdArg = args[0] as! String
+        api.securityInfo(vaultId: vaultIdArg) { result in
           switch result {
           case .success(let res):
             reply(wrapResult(res))
@@ -799,8 +853,8 @@ class EnvelockHostApiSetup {
 /// Generated protocol from Pigeon that represents Flutter messages that can be called from Swift.
 protocol EnvelockFlutterApiProtocol {
   func onKeyMaterialRequested(ctx ctxArg: WireMaterialContext, completion: @escaping (Result<Void, PigeonError>) -> Void)
-  func onRecoveryFactorRequested(requestId requestIdArg: String, reason reasonArg: WireRecoveryReason, completion: @escaping (Result<Void, PigeonError>) -> Void)
-  func onSecurityEvent(event eventArg: WireSecurityEvent, completion: @escaping (Result<Void, PigeonError>) -> Void)
+  func onRecoveryFactorRequested(vaultId vaultIdArg: String, requestId requestIdArg: String, reason reasonArg: WireRecoveryReason, completion: @escaping (Result<Void, PigeonError>) -> Void)
+  func onSecurityEvent(vaultId vaultIdArg: String, event eventArg: WireSecurityEvent, completion: @escaping (Result<Void, PigeonError>) -> Void)
 }
 class EnvelockFlutterApi: EnvelockFlutterApiProtocol {
   private let binaryMessenger: FlutterBinaryMessenger
@@ -830,10 +884,10 @@ class EnvelockFlutterApi: EnvelockFlutterApiProtocol {
       }
     }
   }
-  func onRecoveryFactorRequested(requestId requestIdArg: String, reason reasonArg: WireRecoveryReason, completion: @escaping (Result<Void, PigeonError>) -> Void) {
+  func onRecoveryFactorRequested(vaultId vaultIdArg: String, requestId requestIdArg: String, reason reasonArg: WireRecoveryReason, completion: @escaping (Result<Void, PigeonError>) -> Void) {
     let channelName: String = "dev.flutter.pigeon.envelock.EnvelockFlutterApi.onRecoveryFactorRequested\(messageChannelSuffix)"
     let channel = FlutterBasicMessageChannel(name: channelName, binaryMessenger: binaryMessenger, codec: codec)
-    channel.sendMessage([requestIdArg, reasonArg] as [Any?]) { response in
+    channel.sendMessage([vaultIdArg, requestIdArg, reasonArg] as [Any?]) { response in
       guard let listResponse = response as? [Any?] else {
         completion(.failure(createConnectionError(withChannelName: channelName)))
         return
@@ -848,10 +902,10 @@ class EnvelockFlutterApi: EnvelockFlutterApiProtocol {
       }
     }
   }
-  func onSecurityEvent(event eventArg: WireSecurityEvent, completion: @escaping (Result<Void, PigeonError>) -> Void) {
+  func onSecurityEvent(vaultId vaultIdArg: String, event eventArg: WireSecurityEvent, completion: @escaping (Result<Void, PigeonError>) -> Void) {
     let channelName: String = "dev.flutter.pigeon.envelock.EnvelockFlutterApi.onSecurityEvent\(messageChannelSuffix)"
     let channel = FlutterBasicMessageChannel(name: channelName, binaryMessenger: binaryMessenger, codec: codec)
-    channel.sendMessage([eventArg] as [Any?]) { response in
+    channel.sendMessage([vaultIdArg, eventArg] as [Any?]) { response in
       guard let listResponse = response as? [Any?] else {
         completion(.failure(createConnectionError(withChannelName: channelName)))
         return

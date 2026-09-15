@@ -23,9 +23,15 @@ public class EnvelockPlugin: NSObject, FlutterPlugin, EnvelockHostApi {
     private let queue = DispatchQueue(label: "network.sharering.envelock.flutter", attributes: .concurrent)
     private let pending = PendingCallbacks()
 
-    private var vault: FfiVault?
-    private var keyStore: SecureEnclaveKeyStore?
+    private let registry = NSLock()
+    private var vaults: [String: FfiVault] = [:]
+    private var keyStores: [String: SecureEnclaveKeyStore] = [:]
     fileprivate var flutterApi: EnvelockFlutterApi?
+
+    public func detachFromEngine(for registrar: FlutterPluginRegistrar) {
+        disposeAll()
+        flutterApi = nil
+    }
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = EnvelockPlugin()
@@ -38,7 +44,7 @@ public class EnvelockPlugin: NSObject, FlutterPlugin, EnvelockHostApi {
 
     func create(
         config: WireVaultConfig,
-        completion: @escaping (Result<String, Error>) -> Void
+        completion: @escaping (Result<WireVaultHandle, Error>) -> Void
     ) {
         queue.async {
             do {
@@ -52,37 +58,79 @@ public class EnvelockPlugin: NSObject, FlutterPlugin, EnvelockHostApi {
                 let store = SecureEnclaveKeyStore(
                     service: "network.sharering.envelock.\(config.providerId)"
                 )
-                self.vault = try FfiVault(
+                let vaultId = UUID().uuidString
+                let vault = try FfiVault(
                     config: vaultConfig,
                     enclave: store,
-                    material: BridgedMaterialProvider(plugin: self),
-                    recovery: BridgedRecoveryProvider(plugin: self),
-                    events: BridgedEventSink(plugin: self)
+                    material: BridgedMaterialProvider(plugin: self, vaultId: vaultId),
+                    recovery: BridgedRecoveryProvider(plugin: self, vaultId: vaultId),
+                    events: BridgedEventSink(plugin: self, vaultId: vaultId)
                 )
-                self.keyStore = store
-                completion(.success(directory.path))
+                self.registry.lock()
+                self.vaults[vaultId] = vault
+                self.keyStores[vaultId] = store
+                self.registry.unlock()
+                completion(.success(
+                    WireVaultHandle(vaultId: vaultId, directory: directory.path)
+                ))
             } catch {
                 completion(.failure(Self.flutterError(error)))
             }
         }
     }
 
-    func dispose(completion: @escaping (Result<Void, Error>) -> Void) {
-        queue.async(flags: .barrier) {
-            self.vault?.lock()
-            self.keyStore?.invalidateContext()
-            self.vault = nil
-            self.keyStore = nil
-            // Every in-flight waiter must be released, or its thread blocks until timeout.
-            self.pending.failAll(code: "unavailable", message: "the vault was disposed")
+    func dispose(vaultId: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        queue.async {
+            self.registry.lock()
+            let vault = self.vaults.removeValue(forKey: vaultId)
+            let store = self.keyStores.removeValue(forKey: vaultId)
+            self.registry.unlock()
+
+            vault?.lock()
+            store?.invalidateContext()
+            // Waiters belonging to *this* vault must be released, or their threads block until
+            // timeout. Other vaults' waiters are left alone: disposing one vault must not fail
+            // a callback another one is still waiting on.
+            self.pending.failAll(
+                vaultId: vaultId,
+                code: "unavailable",
+                message: "the vault was disposed"
+            )
             completion(.success(()))
         }
     }
 
+    /// Release every vault. Called when the plugin itself goes away.
+    func disposeAll() {
+        registry.lock()
+        let open = Array(vaults.values)
+        let stores = Array(keyStores.values)
+        vaults.removeAll()
+        keyStores.removeAll()
+        registry.unlock()
+
+        for vault in open { vault.lock() }
+        for store in stores { store.invalidateContext() }
+        pending.failAllRemaining(code: "unavailable", message: "the plugin was torn down")
+    }
+
+    /// The vault named by `vaultId`, or nil once it has been disposed.
+    private func vault(_ vaultId: String) -> FfiVault? {
+        registry.lock()
+        defer { registry.unlock() }
+        return vaults[vaultId]
+    }
+
+    private func keyStore(_ vaultId: String) -> SecureEnclaveKeyStore? {
+        registry.lock()
+        defer { registry.unlock() }
+        return keyStores[vaultId]
+    }
+
     // MARK: - Vault operations
 
-    func state(completion: @escaping (Result<WireStateResult, Error>) -> Void) {
-        run(completion) { vault in
+    func state(vaultId: String, completion: @escaping (Result<WireStateResult, Error>) -> Void) {
+        run(vaultId, completion) { vault in
             switch vault.state() {
             case .notEnrolled: return WireStateResult(state: .notEnrolled)
             case .locked: return WireStateResult(state: .locked)
@@ -95,66 +143,86 @@ public class EnvelockPlugin: NSObject, FlutterPlugin, EnvelockHostApi {
     }
 
     func enroll(
+        vaultId: String,
         factor: WireRecoveryFactor,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
-        run(completion) { try $0.enroll(factor: Self.decodeFactor(factor)) }
+        run(vaultId, completion) { try $0.enroll(factor: Self.decodeFactor(factor)) }
     }
 
-    func unlock(completion: @escaping (Result<Void, Error>) -> Void) {
-        run(completion) { try $0.unlock() }
+    func unlock(vaultId: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        run(vaultId, completion) { try $0.unlock() }
     }
 
-    func unlockWithRecovery(completion: @escaping (Result<Void, Error>) -> Void) {
-        run(completion) { try $0.unlockWithRecovery() }
+    func unlockWithRecovery(
+        vaultId: String,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        run(vaultId, completion) { try $0.unlockWithRecovery() }
     }
 
     func changeRecoveryFactor(
+        vaultId: String,
         factor: WireRecoveryFactor,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
-        run(completion) { try $0.changeRecoveryFactor(newFactor: Self.decodeFactor(factor)) }
+        run(vaultId, completion) {
+            try $0.changeRecoveryFactor(newFactor: Self.decodeFactor(factor))
+        }
     }
 
     func put(
+        vaultId: String,
         recordId: String,
         value: FlutterStandardTypedData,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
-        run(completion) { try $0.put(recordId: recordId, plaintext: value.data) }
+        run(vaultId, completion) { try $0.put(recordId: recordId, plaintext: value.data) }
     }
 
     func get(
+        vaultId: String,
         recordId: String,
         completion: @escaping (Result<FlutterStandardTypedData?, Error>) -> Void
     ) {
-        run(completion) { vault in
+        run(vaultId, completion) { vault in
             try vault.get(recordId: recordId).map { FlutterStandardTypedData(bytes: $0) }
         }
     }
 
-    func delete(recordId: String, completion: @escaping (Result<Void, Error>) -> Void) {
-        run(completion) { try $0.delete(recordId: recordId) }
+    func delete(
+        vaultId: String,
+        recordId: String,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        run(vaultId, completion) { try $0.delete(recordId: recordId) }
     }
 
-    func list(prefix: String, completion: @escaping (Result<[String], Error>) -> Void) {
-        run(completion) { try $0.list(prefix: prefix) }
+    func list(
+        vaultId: String,
+        prefix: String,
+        completion: @escaping (Result<[String], Error>) -> Void
+    ) {
+        run(vaultId, completion) { try $0.list(prefix: prefix) }
     }
 
-    func lock(completion: @escaping (Result<Void, Error>) -> Void) {
-        run(completion) { vault in
+    func lock(vaultId: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        run(vaultId, completion) { vault in
             vault.lock()
             // Drop cached authentication too, so returning to the foreground re-prompts.
-            self.keyStore?.invalidateContext()
+            self.keyStore(vaultId)?.invalidateContext()
         }
     }
 
-    func destroyVault(completion: @escaping (Result<Void, Error>) -> Void) {
-        run(completion) { try $0.destroyVault() }
+    func destroyVault(vaultId: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        run(vaultId, completion) { try $0.destroyVault() }
     }
 
-    func securityInfo(completion: @escaping (Result<WireSecurityInfo, Error>) -> Void) {
-        run(completion) { vault in
+    func securityInfo(
+        vaultId: String,
+        completion: @escaping (Result<WireSecurityInfo, Error>) -> Void
+    ) {
+        run(vaultId, completion) { vault in
             let i = try vault.securityInfo()
             return WireSecurityInfo(
                 hardwareBacking: Self.wireBacking(i.hardwareBacking),
@@ -188,6 +256,7 @@ public class EnvelockPlugin: NSObject, FlutterPlugin, EnvelockHostApi {
 
     /// Ask Dart for something and block this (background) thread until it answers.
     fileprivate func askDart(
+        vaultId: String,
         deadlineMs: UInt64,
         _ send: @escaping (EnvelockFlutterApi, String) -> Void
     ) throws -> (bytes: Data?, text: String?) {
@@ -196,7 +265,7 @@ public class EnvelockPlugin: NSObject, FlutterPlugin, EnvelockHostApi {
         }
 
         let requestId = UUID().uuidString
-        let waiter = pending.register(requestId)
+        let waiter = pending.register(requestId, vaultId: vaultId)
 
         // Platform channels are main-thread only. This must be `async`, never `sync`: the
         // caller is a background thread, and the main thread is the one that will deliver the
@@ -204,20 +273,29 @@ public class EnvelockPlugin: NSObject, FlutterPlugin, EnvelockHostApi {
         DispatchQueue.main.async { send(api, requestId) }
 
         // A generous margin over envelock's own deadline; the core is the authority on timing.
-        return try waiter.wait(timeoutMs: deadlineMs + 5_000)
+        do {
+            return try waiter.wait(timeoutMs: deadlineMs + 5_000)
+        } catch {
+            print(
+                "[envelock] provider callback \(requestId) did not answer within "
+                    + "\(deadlineMs + 5_000)ms; envelock reports this as `unavailable`"
+            )
+            throw error
+        }
     }
 
     // MARK: - Helpers
 
     private func run<T>(
+        _ vaultId: String,
         _ completion: @escaping (Result<T, Error>) -> Void,
         _ body: @escaping (FfiVault) throws -> T
     ) {
         queue.async {
-            guard let vault = self.vault else {
+            guard let vault = self.vault(vaultId) else {
                 return completion(.failure(PigeonError(
                     code: "misconfigured",
-                    message: "the vault has not been created",
+                    message: "no such vault: it was disposed, or never created",
                     details: nil
                 )))
             }
@@ -296,10 +374,17 @@ public class EnvelockPlugin: NSObject, FlutterPlugin, EnvelockHostApi {
 
 private final class BridgedMaterialProvider: KeyMaterialProviderFfi {
     private weak var plugin: EnvelockPlugin?
-    init(plugin: EnvelockPlugin) { self.plugin = plugin }
+    private let vaultId: String
+    init(plugin: EnvelockPlugin, vaultId: String) {
+        self.plugin = plugin
+        self.vaultId = vaultId
+    }
 
     func getKeyMaterial(ctx: FfiMaterialContext) throws -> FfiKeyMaterial {
-        guard let plugin else { throw FfiVaultError.Unavailable }
+        guard let plugin else {
+            print("[envelock] the plugin was deallocated while a provider callback was in flight")
+            throw FfiVaultError.Unavailable
+        }
 
         let reason: WireMaterialReason
         switch ctx.reason {
@@ -308,9 +393,10 @@ private final class BridgedMaterialProvider: KeyMaterialProviderFfi {
         case .rotate: reason = .rotate
         }
 
-        let answer = try plugin.askDart(deadlineMs: ctx.deadlineMs) { api, requestId in
+        let answer = try plugin.askDart(vaultId: vaultId, deadlineMs: ctx.deadlineMs) { api, requestId in
             api.onKeyMaterialRequested(
                 ctx: WireMaterialContext(
+                    vaultId: self.vaultId,
                     requestId: requestId,
                     reason: reason,
                     nonce: FlutterStandardTypedData(bytes: ctx.nonce),
@@ -350,10 +436,17 @@ private final class BridgedMaterialProvider: KeyMaterialProviderFfi {
 
 private final class BridgedRecoveryProvider: RecoveryProviderFfi {
     private weak var plugin: EnvelockPlugin?
-    init(plugin: EnvelockPlugin) { self.plugin = plugin }
+    private let vaultId: String
+    init(plugin: EnvelockPlugin, vaultId: String) {
+        self.plugin = plugin
+        self.vaultId = vaultId
+    }
 
     func getRecoveryFactor(reason: FfiRecoveryReason) throws -> FfiRecoveryFactor {
-        guard let plugin else { throw FfiVaultError.Unavailable }
+        guard let plugin else {
+            print("[envelock] the plugin was deallocated while a provider callback was in flight")
+            throw FfiVaultError.Unavailable
+        }
 
         let wire: WireRecoveryReason
         switch reason {
@@ -363,8 +456,10 @@ private final class BridgedRecoveryProvider: RecoveryProviderFfi {
         }
 
         // A human is typing or approving; give them real time.
-        let answer = try plugin.askDart(deadlineMs: 300_000) { api, requestId in
-            api.onRecoveryFactorRequested(requestId: requestId, reason: wire) { _ in }
+        let answer = try plugin.askDart(vaultId: vaultId, deadlineMs: 300_000) { api, requestId in
+            api.onRecoveryFactorRequested(
+                vaultId: self.vaultId, requestId: requestId, reason: wire
+            ) { _ in }
         }
 
         if let bytes = answer.bytes, answer.text == "highEntropy" {
@@ -379,7 +474,11 @@ private final class BridgedRecoveryProvider: RecoveryProviderFfi {
 
 private final class BridgedEventSink: SecurityEventSinkFfi {
     private weak var plugin: EnvelockPlugin?
-    init(plugin: EnvelockPlugin) { self.plugin = plugin }
+    private let vaultId: String
+    init(plugin: EnvelockPlugin, vaultId: String) {
+        self.plugin = plugin
+        self.vaultId = vaultId
+    }
 
     func onEvent(event: FfiSecurityEvent) {
         guard let plugin, let api = plugin.flutterApi else { return }
@@ -410,7 +509,8 @@ private final class BridgedEventSink: SecurityEventSinkFfi {
 
         // Platform channels are main-thread only, and this may fire from a Rust thread.
         let event = wire
-        DispatchQueue.main.async { api.onSecurityEvent(event: event) { _ in } }
+        let id = vaultId
+        DispatchQueue.main.async { api.onSecurityEvent(vaultId: id, event: event) { _ in } }
     }
 
     private static func backing(_ b: FfiHardwareBacking) -> WireHardwareBacking {
@@ -469,30 +569,48 @@ private final class PendingCallbacks {
     }
 
     private let lock = NSLock()
-    private var waiters: [String: Waiter] = [:]
+    private var waiters: [String: (vaultId: String, waiter: Waiter)] = [:]
 
-    func register(_ id: String) -> Waiter {
+    func register(_ id: String, vaultId: String) -> Waiter {
         let waiter = Waiter()
         lock.lock()
-        waiters[id] = waiter
+        waiters[id] = (vaultId: vaultId, waiter: waiter)
         lock.unlock()
         return waiter
     }
 
     func resolve(_ id: String, bytes: Data?, text: String?, error: (String, String)?) {
         lock.lock()
-        let waiter = waiters.removeValue(forKey: id)
+        let entry = waiters.removeValue(forKey: id)
         lock.unlock()
-        waiter?.complete(bytes: bytes, text: text, error: error)
+
+        guard let entry else {
+            print(
+                "[envelock] provider callback \(id) answered after envelock had given up; "
+                    + "the result was discarded and reported as `unavailable`"
+            )
+            return
+        }
+        entry.waiter.complete(bytes: bytes, text: text, error: error)
     }
 
-    func failAll(code: String, message: String) {
+    func failAll(vaultId: String, code: String, message: String) {
+        lock.lock()
+        let doomed = waiters.filter { $0.value.vaultId == vaultId }
+        for id in doomed.keys { waiters.removeValue(forKey: id) }
+        lock.unlock()
+        for entry in doomed.values {
+            entry.waiter.complete(bytes: nil, text: nil, error: (code, message))
+        }
+    }
+
+    func failAllRemaining(code: String, message: String) {
         lock.lock()
         let all = waiters
         waiters.removeAll()
         lock.unlock()
-        for waiter in all.values {
-            waiter.complete(bytes: nil, text: nil, error: (code, message))
+        for entry in all.values {
+            entry.waiter.complete(bytes: nil, text: nil, error: (code, message))
         }
     }
 }

@@ -24,7 +24,11 @@ import uniffi.envelock.FfiHardwareBacking
  * with no PIN, pattern or password. Tests assume-skip rather than fail in that case, so an
  * unconfigured CI emulator stays green while still reporting what it could not cover.
  *
- * Tests that would raise a biometric prompt cannot run unattended and are marked as such.
+ * **Every test that touches the enclave key raises a prompt**, including `createKey`: the key
+ * requires authentication per use regardless of direction, so wrapping the device secret at
+ * enrollment prompts exactly as unwrapping it does. Those tests gate on
+ * `ENVELOCK_INTERACTIVE=1` and skip otherwise, so CI stays green while still reporting what it
+ * could not cover.
  */
 @RunWith(AndroidJUnit4::class)
 class KeystoreKeyStoreTest {
@@ -64,8 +68,15 @@ class KeystoreKeyStoreTest {
         assertTrue(backing.isHardwareBacked)
     }
 
+    /** Skips unless the run can be authenticated by hand. */
+    private fun requireInteractive() = assumeTrue(
+        "raises a system authentication prompt; run manually with ENVELOCK_INTERACTIVE=1",
+        System.getenv("ENVELOCK_INTERACTIVE") == "1"
+    )
+
     @Test
     fun createKeyThenKeyExists() {
+        requireInteractive()
         assertFalse(store.keyExists(vaultId))
         store.createKey(vaultId)
         assertTrue(store.keyExists(vaultId))
@@ -77,6 +88,7 @@ class KeystoreKeyStoreTest {
      */
     @Test
     fun keyExistsDoesNotAuthenticate() {
+        requireInteractive()
         store.createKey(vaultId)
         repeat(5) { assertTrue(store.keyExists(vaultId)) }
     }
@@ -87,6 +99,7 @@ class KeystoreKeyStoreTest {
      */
     @Test
     fun createKeyIsIdempotent() {
+        requireInteractive()
         store.createKey(vaultId)
         store.createKey(vaultId)
         assertTrue(store.keyExists(vaultId))
@@ -94,6 +107,7 @@ class KeystoreKeyStoreTest {
 
     @Test
     fun deleteRemovesBothTheKeyAndTheWrappedSecret() {
+        requireInteractive()
         store.createKey(vaultId)
         store.deleteKey(vaultId)
 
@@ -104,6 +118,7 @@ class KeystoreKeyStoreTest {
 
     @Test
     fun vaultsAreIsolated() {
+        requireInteractive()
         val other = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
         try {
             store.createKey(vaultId)
@@ -116,17 +131,12 @@ class KeystoreKeyStoreTest {
     }
 
     /**
-     * Unsealing the device secret raises the OS prompt, so this cannot run unattended.
-     *
-     * Enable it on a device where you can authenticate by hand. It checks the only property the
-     * whole key hierarchy depends on: that the secret is stable across calls.
+     * Checks the only property the whole key hierarchy depends on: the secret is stable across
+     * calls. Costs one prompt for `createKey` and one for each `deviceSecret`.
      */
     @Test
     fun deviceSecretIsStableAcrossCalls() {
-        assumeTrue(
-            "raises a biometric prompt; run manually with ENVELOCK_INTERACTIVE=1",
-            System.getenv("ENVELOCK_INTERACTIVE") == "1"
-        )
+        requireInteractive()
 
         store.createKey(vaultId)
         val first = store.deviceSecret(vaultId)

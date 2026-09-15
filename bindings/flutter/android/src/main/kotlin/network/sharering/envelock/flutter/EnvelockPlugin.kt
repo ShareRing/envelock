@@ -47,12 +47,16 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
 
     private val executor = Executors.newCachedThreadPool()
     private val main = Handler(Looper.getMainLooper())
-    private val pending = ConcurrentHashMap<String, SynchronousQueue<CallbackResult>>()
+    private val pending = ConcurrentHashMap<String, Waiter>()
 
     private lateinit var context: Context
     private var flutterApi: EnvelockFlutterApi? = null
 
-    @Volatile private var vault: FfiVault? = null
+    private val vaults = ConcurrentHashMap<String, FfiVault>()
+
+    private class Waiter(val vaultId: String) {
+        val queue = SynchronousQueue<CallbackResult>()
+    }
 
     private data class CallbackResult(
         val bytes: ByteArray?,
@@ -71,15 +75,15 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
         EnvelockHostApi.setUp(binding.binaryMessenger, null)
         flutterApi = null
         releaseAllWaiters()
-        vault?.lock()
-        vault = null
+        vaults.values.forEach { it.lock() }
+        vaults.clear()
     }
 
     // -----------------------------------------------------------------------------------
     // Lifecycle
     // -----------------------------------------------------------------------------------
 
-    override fun create(config: WireVaultConfig, callback: (Result<String>) -> Unit) {
+    override fun create(config: WireVaultConfig, callback: (Result<WireVaultHandle>) -> Unit) {
         executor.execute {
             try {
                 // Internal storage, never the cache directory: the OS evicts caches under
@@ -94,25 +98,27 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
                     destroyAfterAttempts = config.destroyAfterAttempts?.toUInt(),
                 )
 
-                vault = FfiVault(
+                val vaultId = UUID.randomUUID().toString()
+                vaults[vaultId] = FfiVault(
                     vaultConfig,
                     KeystoreKeyStore(context, "network.sharering.envelock.${config.providerId}"),
-                    BridgedMaterialProvider(),
-                    BridgedRecoveryProvider(),
-                    BridgedEventSink(),
+                    BridgedMaterialProvider(vaultId),
+                    BridgedRecoveryProvider(vaultId),
+                    BridgedEventSink(vaultId),
                 )
-                callback(Result.success(directory.absolutePath))
+                callback(Result.success(
+                    WireVaultHandle(vaultId, directory.absolutePath)
+                ))
             } catch (e: Throwable) {
                 callback(Result.failure(toFlutterError(e)))
             }
         }
     }
 
-    override fun dispose(callback: (Result<Unit>) -> Unit) {
+    override fun dispose(vaultId: String, callback: (Result<Unit>) -> Unit) {
         executor.execute {
-            vault?.lock()
-            vault = null
-            releaseAllWaiters()
+            vaults.remove(vaultId)?.lock()
+            releaseWaiters(vaultId)
             callback(Result.success(Unit))
         }
     }
@@ -121,7 +127,8 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
     // Vault operations
     // -----------------------------------------------------------------------------------
 
-    override fun state(callback: (Result<WireStateResult>) -> Unit) = run(callback) { v ->
+    override fun state(vaultId: String, callback: (Result<WireStateResult>) -> Unit) =
+        run(vaultId, callback) { v ->
         when (val s = v.state()) {
             is FfiVaultState.NotEnrolled -> WireStateResult(WireVaultState.NOT_ENROLLED)
             is FfiVaultState.Locked -> WireStateResult(WireVaultState.LOCKED)
@@ -132,36 +139,48 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
         }
     }
 
-    override fun enroll(factor: WireRecoveryFactor, callback: (Result<Unit>) -> Unit) =
-        run(callback) { it.enroll(decodeFactor(factor)) }
-
-    override fun unlock(callback: (Result<Unit>) -> Unit) = run(callback) { it.unlock() }
-
-    override fun unlockWithRecovery(callback: (Result<Unit>) -> Unit) =
-        run(callback) { it.unlockWithRecovery() }
-
-    override fun changeRecoveryFactor(
+    override fun enroll(
+        vaultId: String,
         factor: WireRecoveryFactor,
         callback: (Result<Unit>) -> Unit,
-    ) = run(callback) { it.changeRecoveryFactor(decodeFactor(factor)) }
+    ) = run(vaultId, callback) { it.enroll(decodeFactor(factor)) }
 
-    override fun put(recordId: String, value: ByteArray, callback: (Result<Unit>) -> Unit) =
-        run(callback) { it.put(recordId, value) }
+    override fun unlock(vaultId: String, callback: (Result<Unit>) -> Unit) =
+        run(vaultId, callback) { it.unlock() }
 
-    override fun get(recordId: String, callback: (Result<ByteArray?>) -> Unit) =
-        run(callback) { it.get(recordId) }
+    override fun unlockWithRecovery(vaultId: String, callback: (Result<Unit>) -> Unit) =
+        run(vaultId, callback) { it.unlockWithRecovery() }
 
-    override fun delete(recordId: String, callback: (Result<Unit>) -> Unit) =
-        run(callback) { it.delete(recordId) }
+    override fun changeRecoveryFactor(
+        vaultId: String,
+        factor: WireRecoveryFactor,
+        callback: (Result<Unit>) -> Unit,
+    ) = run(vaultId, callback) { it.changeRecoveryFactor(decodeFactor(factor)) }
 
-    override fun list(prefix: String, callback: (Result<List<String>>) -> Unit) =
-        run(callback) { it.list(prefix) }
+    override fun put(
+        vaultId: String,
+        recordId: String,
+        value: ByteArray,
+        callback: (Result<Unit>) -> Unit,
+    ) = run(vaultId, callback) { it.put(recordId, value) }
 
-    override fun lock(callback: (Result<Unit>) -> Unit) = run(callback) { it.lock() }
+    override fun get(vaultId: String, recordId: String, callback: (Result<ByteArray?>) -> Unit) =
+        run(vaultId, callback) { it.get(recordId) }
 
-    override fun destroyVault(callback: (Result<Unit>) -> Unit) = run(callback) { it.destroyVault() }
+    override fun delete(vaultId: String, recordId: String, callback: (Result<Unit>) -> Unit) =
+        run(vaultId, callback) { it.delete(recordId) }
 
-    override fun securityInfo(callback: (Result<WireSecurityInfo>) -> Unit) = run(callback) { v ->
+    override fun list(vaultId: String, prefix: String, callback: (Result<List<String>>) -> Unit) =
+        run(vaultId, callback) { it.list(prefix) }
+
+    override fun lock(vaultId: String, callback: (Result<Unit>) -> Unit) =
+        run(vaultId, callback) { it.lock() }
+
+    override fun destroyVault(vaultId: String, callback: (Result<Unit>) -> Unit) =
+        run(vaultId, callback) { it.destroyVault() }
+
+    override fun securityInfo(vaultId: String, callback: (Result<WireSecurityInfo>) -> Unit) =
+        run(vaultId, callback) { v ->
         val i = v.securityInfo()
         WireSecurityInfo(
             hardwareBacking = wireBacking(i.hardwareBacking),
@@ -190,25 +209,26 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
         errorMessage: String?,
     ) {
         pending.remove(requestId)
-            ?.offer(CallbackResult(payload, payloadText, errorCode, errorMessage))
+            ?.queue?.offer(CallbackResult(payload, payloadText, errorCode, errorMessage))
     }
 
     /** Ask Dart for something and block this (background) thread until it answers. */
     private fun askDart(
+        vaultId: String,
         timeoutMs: Long,
         send: (EnvelockFlutterApi, String) -> Unit,
     ): CallbackResult {
         val api = flutterApi ?: throw FfiVaultException.Misconfigured("the plugin is detached")
 
         val requestId = UUID.randomUUID().toString()
-        val queue = SynchronousQueue<CallbackResult>()
-        pending[requestId] = queue
+        val waiter = Waiter(vaultId)
+        pending[requestId] = waiter
 
         // Platform channels are main-thread only, and the caller here is a background thread.
         main.post { send(api, requestId) }
 
         val result = try {
-            queue.poll(timeoutMs, TimeUnit.MILLISECONDS)
+            waiter.queue.poll(timeoutMs, TimeUnit.MILLISECONDS)
         } finally {
             pending.remove(requestId)
         } ?: throw FfiVaultException.Unavailable()
@@ -217,10 +237,19 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
         return result
     }
 
+    /** Release the waiters belonging to one vault, leaving every other vault's alone. */
+    private fun releaseWaiters(vaultId: String) {
+        pending.entries.filter { it.value.vaultId == vaultId }.forEach { (id, _) ->
+            pending.remove(id)?.queue?.offer(
+                CallbackResult(null, null, WireErrorCode.UNAVAILABLE, "the vault was disposed")
+            )
+        }
+    }
+
     private fun releaseAllWaiters() {
         pending.keys.toList().forEach {
-            pending.remove(it)?.offer(
-                CallbackResult(null, null, WireErrorCode.UNAVAILABLE, "the vault was disposed")
+            pending.remove(it)?.queue?.offer(
+                CallbackResult(null, null, WireErrorCode.UNAVAILABLE, "the plugin was detached")
             )
         }
     }
@@ -242,7 +271,8 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
     // Bridged providers
     // -----------------------------------------------------------------------------------
 
-    private inner class BridgedMaterialProvider : KeyMaterialProviderFfi {
+    private inner class BridgedMaterialProvider(private val vaultId: String) :
+        KeyMaterialProviderFfi {
         override fun getKeyMaterial(ctx: FfiMaterialContext): FfiKeyMaterial {
             val reason = when (ctx.reason) {
                 FfiMaterialReason.ENROLL -> WireMaterialReason.ENROLL
@@ -251,9 +281,11 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
             }
 
             // A margin over envelock's own deadline; the core is the authority on timing.
-            val result = askDart(ctx.deadlineMs.toLong() + 5_000) { api, requestId ->
+            val result = askDart(vaultId, ctx.deadlineMs.toLong() + 5_000) { api, requestId ->
                 api.onKeyMaterialRequested(
-                    WireMaterialContext(requestId, reason, ctx.nonce, ctx.deadlineMs.toLong())
+                    WireMaterialContext(
+                        vaultId, requestId, reason, ctx.nonce, ctx.deadlineMs.toLong()
+                    )
                 ) {}
             }
 
@@ -275,7 +307,8 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
         }
     }
 
-    private inner class BridgedRecoveryProvider : RecoveryProviderFfi {
+    private inner class BridgedRecoveryProvider(private val vaultId: String) :
+        RecoveryProviderFfi {
         override fun getRecoveryFactor(reason: FfiRecoveryReason): FfiRecoveryFactor {
             val wire = when (reason) {
                 FfiRecoveryReason.MIGRATE -> WireRecoveryReason.MIGRATE
@@ -284,8 +317,8 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
             }
 
             // A human is typing or approving; give them real time.
-            val result = askDart(300_000) { api, requestId ->
-                api.onRecoveryFactorRequested(requestId, wire) {}
+            val result = askDart(vaultId, 300_000) { api, requestId ->
+                api.onRecoveryFactorRequested(vaultId, requestId, wire) {}
             }
 
             val bytes = result.bytes
@@ -301,7 +334,7 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
         }
     }
 
-    private inner class BridgedEventSink : SecurityEventSinkFfi {
+    private inner class BridgedEventSink(private val vaultId: String) : SecurityEventSinkFfi {
         override fun onEvent(event: FfiSecurityEvent) {
             val api = flutterApi ?: return
             val wire = when (event) {
@@ -326,7 +359,7 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
                     WireSecurityEvent("hardwareDowngraded", hardware = wireBacking(event.to))
             }
             // Platform channels are main-thread only, and this may fire from a Rust thread.
-            main.post { api.onSecurityEvent(wire) {} }
+            main.post { api.onSecurityEvent(vaultId, wire) {} }
         }
     }
 
@@ -334,13 +367,17 @@ class EnvelockPlugin : FlutterPlugin, EnvelockHostApi {
     // Helpers
     // -----------------------------------------------------------------------------------
 
-    private fun <T> run(callback: (Result<T>) -> Unit, body: (FfiVault) -> T) {
+    private fun <T> run(vaultId: String, callback: (Result<T>) -> Unit, body: (FfiVault) -> T) {
         executor.execute {
-            val v = vault
+            val v = vaults[vaultId]
             if (v == null) {
                 callback(
                     Result.failure(
-                        FlutterError("misconfigured", "the vault has not been created", null)
+                        FlutterError(
+                            "misconfigured",
+                            "no such vault: it was disposed, or never created",
+                            null,
+                        )
                     )
                 )
                 return@execute

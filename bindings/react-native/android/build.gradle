@@ -10,10 +10,7 @@ android {
     compileSdk 35
 
     defaultConfig {
-        // 24, not envelock's own floor of 23: React Native 0.76's native libraries are built
-        // for 24, so this binding cannot go lower. `:envelock-android` stays at 23 and remains
-        // usable from a native Android app on that API level.
-        minSdk 24
+        minSdk 28
         consumerProguardFiles "consumer-rules.pro"
 
         externalNativeBuild {
@@ -55,5 +52,5 @@ dependencies {
     // standalone in CI. Inside a real app the plugin substitutes the app's own version; keep
     // this aligned with the `react-native` peer dependency in package.json.
     compileOnly "com.facebook.react:react-android:0.76.9"
-    implementation "network.sharering:envelock-android:0.1.0"
+    implementation "network.sharering:envelock-android:0.2.0"
 }

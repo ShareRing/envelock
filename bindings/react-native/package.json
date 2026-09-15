@@ -1,6 +1,6 @@
 {
   "name": "@sharering/react-native-envelock",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Encrypted local storage for React Native, backed by the Secure Enclave and Android Keystore.",
   "license": "Apache-2.0",
   "repository": {

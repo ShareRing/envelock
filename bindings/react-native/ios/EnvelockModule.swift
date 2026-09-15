@@ -27,8 +27,9 @@ final class EnvelockModule: RCTEventEmitter {
     private let queue = DispatchQueue(label: "network.sharering.envelock.rn", attributes: .concurrent)
     private let pending = PendingCallbacks()
 
-    private var vault: FfiVault?
-    private var keyStore: SecureEnclaveKeyStore?
+    private let registry = NSLock()
+    private var vaults: [String: FfiVault] = [:]
+    private var keyStores: [String: SecureEnclaveKeyStore] = [:]
     private var listening = false
 
     override static func requiresMainQueueSetup() -> Bool { false }
@@ -63,43 +64,59 @@ final class EnvelockModule: RCTEventEmitter {
                     (config["destroyAfterAttempts"] as? NSNumber)?.uint32Value
 
                 let store = SecureEnclaveKeyStore(service: "network.sharering.envelock.\(providerId)")
+                let vaultId = UUID().uuidString
                 let vault = try FfiVault(
                     config: vaultConfig,
                     enclave: store,
-                    material: BridgedMaterialProvider(module: self),
-                    recovery: BridgedRecoveryProvider(module: self),
-                    events: BridgedEventSink(module: self)
+                    material: BridgedMaterialProvider(module: self, vaultId: vaultId),
+                    recovery: BridgedRecoveryProvider(module: self, vaultId: vaultId),
+                    events: BridgedEventSink(module: self, vaultId: vaultId)
                 )
 
-                self.keyStore = store
-                self.vault = vault
-                resolve(directory.path)
+                self.registry.lock()
+                self.vaults[vaultId] = vault
+                self.keyStores[vaultId] = store
+                self.registry.unlock()
+
+                resolve("\(vaultId) \(directory.path)")
             } catch {
                 Self.rejectWith(error, reject)
             }
         }
     }
 
-    @objc(destroyInstance:reject:)
+    @objc(destroyInstance:resolve:reject:)
     func destroyInstance(
-        _ resolve: @escaping RCTPromiseResolveBlock,
+        _ vaultId: String,
+        resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        queue.async(flags: .barrier) {
-            self.vault?.lock()
-            self.keyStore?.invalidateContext()
-            self.vault = nil
-            self.keyStore = nil
-            self.pending.failAll(code: "unavailable", message: "the vault was disposed")
+        queue.async {
+            self.registry.lock()
+            let vault = self.vaults.removeValue(forKey: vaultId)
+            let store = self.keyStores.removeValue(forKey: vaultId)
+            self.registry.unlock()
+
+            vault?.lock()
+            store?.invalidateContext()
+            self.pending.failAll(
+                vaultId: vaultId,
+                code: "unavailable",
+                message: "the vault was disposed"
+            )
             resolve(nil)
         }
     }
 
     // MARK: - Vault operations
 
-    @objc(state:reject:)
-    func state(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
-        run(resolve, reject) { vault in
+    @objc(state:resolve:reject:)
+    func state(
+        _ vaultId: String,
+        resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        run(vaultId, resolve, reject) { vault in
             switch vault.state() {
             case .notEnrolled: return "not_enrolled"
             case .locked: return "locked"
@@ -112,42 +129,49 @@ final class EnvelockModule: RCTEventEmitter {
 
     /// A high-entropy factor arrives as a buffer token; a passphrase is inherently a string,
     /// so there is nothing to gain by tokenizing it.
-    @objc(enroll:token:passphrase:resolve:reject:)
+    @objc(enroll:kind:token:passphrase:resolve:reject:)
     func enroll(
-        _ kind: String,
+        _ vaultId: String,
+        kind: String,
         token: NSNumber,
         passphrase: String,
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        run(resolve, reject) {
+        run(vaultId, resolve, reject) {
             try $0.enroll(factor: Self.decodeFactor(kind, token.uint64Value, passphrase))
             return nil
         }
     }
 
-    @objc(unlock:reject:)
-    func unlock(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
-        run(resolve, reject) { try $0.unlock(); return nil }
-    }
-
-    @objc(unlockWithRecovery:reject:)
-    func unlockWithRecovery(
-        _ resolve: @escaping RCTPromiseResolveBlock,
+    @objc(unlock:resolve:reject:)
+    func unlock(
+        _ vaultId: String,
+        resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        run(resolve, reject) { try $0.unlockWithRecovery(); return nil }
+        run(vaultId, resolve, reject) { try $0.unlock(); return nil }
     }
 
-    @objc(changeRecoveryFactor:token:passphrase:resolve:reject:)
+    @objc(unlockWithRecovery:resolve:reject:)
+    func unlockWithRecovery(
+        _ vaultId: String,
+        resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        run(vaultId, resolve, reject) { try $0.unlockWithRecovery(); return nil }
+    }
+
+    @objc(changeRecoveryFactor:kind:token:passphrase:resolve:reject:)
     func changeRecoveryFactor(
-        _ kind: String,
+        _ vaultId: String,
+        kind: String,
         token: NSNumber,
         passphrase: String,
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        run(resolve, reject) {
+        run(vaultId, resolve, reject) {
             try $0.changeRecoveryFactor(
                 newFactor: Self.decodeFactor(kind, token.uint64Value, passphrase)
             )
@@ -157,14 +181,15 @@ final class EnvelockModule: RCTEventEmitter {
 
     /// `token` names bytes JavaScript already handed to the JSI buffer registry, so no
     /// record content is ever a JavaScript string.
-    @objc(put:token:resolve:reject:)
+    @objc(put:recordId:token:resolve:reject:)
     func put(
-        _ recordId: String,
+        _ vaultId: String,
+        recordId: String,
         token: NSNumber,
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        run(resolve, reject) {
+        run(vaultId, resolve, reject) {
             guard let data = BufferBridge.take(token.uint64Value) else {
                 throw FfiVaultError.Misconfigured(
                     detail: "unknown or already-redeemed buffer token"
@@ -177,60 +202,69 @@ final class EnvelockModule: RCTEventEmitter {
     }
 
     /// Returns a token JavaScript redeems for an `ArrayBuffer`, or `0` for a missing record.
-    @objc(get:resolve:reject:)
+    @objc(get:recordId:resolve:reject:)
     func get(
-        _ recordId: String,
+        _ vaultId: String,
+        recordId: String,
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        run(resolve, reject) { vault in
+        run(vaultId, resolve, reject) { vault in
             guard let data = try vault.get(recordId: recordId) else { return NSNumber(value: 0) }
             return NSNumber(value: BufferBridge.put(data))
         }
     }
 
-    @objc(remove:resolve:reject:)
+    @objc(remove:recordId:resolve:reject:)
     func remove(
-        _ recordId: String,
+        _ vaultId: String,
+        recordId: String,
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        run(resolve, reject) { try $0.delete(recordId: recordId); return nil }
+        run(vaultId, resolve, reject) { try $0.delete(recordId: recordId); return nil }
     }
 
-    @objc(list:resolve:reject:)
+    @objc(list:prefix:resolve:reject:)
     func list(
-        _ prefix: String,
+        _ vaultId: String,
+        prefix: String,
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        run(resolve, reject) { try $0.list(prefix: prefix) }
+        run(vaultId, resolve, reject) { try $0.list(prefix: prefix) }
     }
 
-    @objc(lock:reject:)
-    func lock(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
-        run(resolve, reject) { vault in
+    @objc(lock:resolve:reject:)
+    func lock(
+        _ vaultId: String,
+        resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        run(vaultId, resolve, reject) { vault in
             vault.lock()
             // Drop the cached authentication too, so returning to the foreground re-prompts.
-            self.keyStore?.invalidateContext()
+            self.keyStore(vaultId)?.invalidateContext()
             return nil
         }
     }
 
-    @objc(destroyVault:reject:)
+    @objc(destroyVault:resolve:reject:)
     func destroyVault(
-        _ resolve: @escaping RCTPromiseResolveBlock,
+        _ vaultId: String,
+        resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        run(resolve, reject) { try $0.destroyVault(); return nil }
+        run(vaultId, resolve, reject) { try $0.destroyVault(); return nil }
     }
 
-    @objc(securityInfo:reject:)
+    @objc(securityInfo:resolve:reject:)
     func securityInfo(
-        _ resolve: @escaping RCTPromiseResolveBlock,
+        _ vaultId: String,
+        resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        run(resolve, reject) { vault in
+        run(vaultId, resolve, reject) { vault in
             let i = try vault.securityInfo()
             let json: [String: Any] = [
                 "hardwareBacking": Self.name(i.hardwareBacking),
@@ -266,6 +300,7 @@ final class EnvelockModule: RCTEventEmitter {
 
     /// Ask JS for something and block this (background) thread until it answers.
     fileprivate func askJS(
+        vaultId: String,
         event: String,
         body: [String: Any],
         deadlineMs: UInt64
@@ -277,10 +312,12 @@ final class EnvelockModule: RCTEventEmitter {
         }
 
         let requestId = UUID().uuidString
-        let waiter = pending.register(requestId)
+        let waiter = pending.register(requestId, vaultId: vaultId)
 
         var payload = body
         payload["requestId"] = requestId
+        // JavaScript dispatches on this: one router for the process, not a listener per vault.
+        payload["vaultId"] = vaultId
         sendEvent(withName: event, body: payload)
 
         // A generous margin over envelock's own deadline: the core is the authority on timing,
@@ -291,13 +328,14 @@ final class EnvelockModule: RCTEventEmitter {
     // MARK: - Helpers
 
     private func run(
+        _ vaultId: String,
         _ resolve: @escaping RCTPromiseResolveBlock,
         _ reject: @escaping RCTPromiseRejectBlock,
         _ body: @escaping (FfiVault) throws -> Any?
     ) {
         queue.async {
-            guard let vault = self.vault else {
-                reject("misconfigured", "the vault has not been created", nil)
+            guard let vault = self.vault(vaultId) else {
+                reject("misconfigured", "no such vault: it was disposed, or never created", nil)
                 return
             }
             do {
@@ -306,6 +344,18 @@ final class EnvelockModule: RCTEventEmitter {
                 Self.rejectWith(error, reject)
             }
         }
+    }
+
+    private func vault(_ vaultId: String) -> FfiVault? {
+        registry.lock()
+        defer { registry.unlock() }
+        return vaults[vaultId]
+    }
+
+    private func keyStore(_ vaultId: String) -> SecureEnclaveKeyStore? {
+        registry.lock()
+        defer { registry.unlock() }
+        return keyStores[vaultId]
     }
 
     private func resolveDirectory(_ requested: String?) throws -> URL {
@@ -372,8 +422,12 @@ final class EnvelockModule: RCTEventEmitter {
 // MARK: - Bridged providers
 
 private final class BridgedMaterialProvider: KeyMaterialProviderFfi {
+    private let vaultId: String
     private weak var module: EnvelockModule?
-    init(module: EnvelockModule) { self.module = module }
+    init(module: EnvelockModule, vaultId: String) {
+        self.module = module
+        self.vaultId = vaultId
+    }
 
     func getKeyMaterial(ctx: FfiMaterialContext) throws -> FfiKeyMaterial {
         guard let module else { throw FfiVaultError.Unavailable }
@@ -387,6 +441,7 @@ private final class BridgedMaterialProvider: KeyMaterialProviderFfi {
 
         // The nonce goes out as a token too, so nothing about this exchange is a JS string.
         let answer = try module.askJS(
+            vaultId: vaultId,
             event: "envelock:getKeyMaterial",
             body: [
                 "reason": reason,
@@ -416,8 +471,12 @@ private final class BridgedMaterialProvider: KeyMaterialProviderFfi {
 }
 
 private final class BridgedRecoveryProvider: RecoveryProviderFfi {
+    private let vaultId: String
     private weak var module: EnvelockModule?
-    init(module: EnvelockModule) { self.module = module }
+    init(module: EnvelockModule, vaultId: String) {
+        self.module = module
+        self.vaultId = vaultId
+    }
 
     func getRecoveryFactor(reason: FfiRecoveryReason) throws -> FfiRecoveryFactor {
         guard let module else { throw FfiVaultError.Unavailable }
@@ -430,6 +489,7 @@ private final class BridgedRecoveryProvider: RecoveryProviderFfi {
         }
 
         let answer = try module.askJS(
+            vaultId: vaultId,
             event: "envelock:getRecoveryFactor",
             body: ["reason": name],
             deadlineMs: 300_000  // A human is typing or approving; give them real time.
@@ -447,8 +507,12 @@ private final class BridgedRecoveryProvider: RecoveryProviderFfi {
 }
 
 private final class BridgedEventSink: SecurityEventSinkFfi {
+    private let vaultId: String
     private weak var module: EnvelockModule?
-    init(module: EnvelockModule) { self.module = module }
+    init(module: EnvelockModule, vaultId: String) {
+        self.module = module
+        self.vaultId = vaultId
+    }
 
     func onEvent(event: FfiSecurityEvent) {
         var body: [String: Any] = [:]
@@ -466,7 +530,9 @@ private final class BridgedEventSink: SecurityEventSinkFfi {
         case .vaultDestroyed(let reason): body = ["type": "vaultDestroyed", "reason": reason]
         case .hardwareDowngraded(let to): body = ["type": "hardwareDowngraded", "to": "\(to)"]
         }
-        module?.sendEvent(withName: "envelock:securityEvent", body: body)
+        var payload = body
+        payload["vaultId"] = vaultId
+        module?.sendEvent(withName: "envelock:securityEvent", body: payload)
     }
 }
 
@@ -519,22 +585,22 @@ private final class PendingCallbacks {
     }
 
     private let lock = NSLock()
-    private var waiters: [String: Waiter] = [:]
+    private var waiters: [String: (vaultId: String, waiter: Waiter)] = [:]
 
-    func register(_ id: String) -> Waiter {
+    func register(_ id: String, vaultId: String) -> Waiter {
         let waiter = Waiter()
         lock.lock()
-        waiters[id] = waiter
+        waiters[id] = (vaultId: vaultId, waiter: waiter)
         lock.unlock()
         return waiter
     }
 
     func resolve(_ id: String, token: UInt64, text: String, error: (String, String)?) {
         lock.lock()
-        let waiter = waiters.removeValue(forKey: id)
+        let entry = waiters.removeValue(forKey: id)
         lock.unlock()
 
-        guard let waiter else {
+        guard let waiter = entry?.waiter else {
             // Nobody is waiting - the request timed out or the vault was disposed. The payload
             // must still be released, or an abandoned secret sits in memory until exit.
             if token != 0 { BufferBridge.drop(token) }
@@ -543,12 +609,14 @@ private final class PendingCallbacks {
         waiter.complete(token: token, text: text, error: error)
     }
 
-    func failAll(code: String, message: String) {
+    func failAll(vaultId: String, code: String, message: String) {
         lock.lock()
-        let all = waiters
-        waiters.removeAll()
+        let doomed = waiters.filter { $0.value.vaultId == vaultId }
+        for id in doomed.keys { waiters.removeValue(forKey: id) }
         lock.unlock()
-        for waiter in all.values { waiter.complete(token: 0, text: "", error: (code, message)) }
+        for entry in doomed.values {
+            entry.waiter.complete(token: 0, text: "", error: (code, message))
+        }
     }
 }
 

@@ -18,7 +18,9 @@ import { VaultError } from './types';
  * not security, because the path carrying secrets is JSI either way.
  */
 export interface Spec extends TurboModule {
-  /** Create the vault. Returns the resolved storage directory. */
+  /**
+   * Create a vault. Returns `<vaultId> <directory>`, space-separated.
+   */
   create(config: {
     providerId: string;
     directory: string | null;
@@ -27,31 +29,36 @@ export interface Spec extends TurboModule {
     destroyAfterAttempts: number | null;
   }): Promise<string>;
 
-  destroyInstance(): Promise<void>;
+  destroyInstance(vaultId: string): Promise<void>;
 
   /** `not_enrolled` | `locked` | `unlocked` | `locked_out:<untilMs>` | `needs_recovery`. */
-  state(): Promise<string>;
+  state(vaultId: string): Promise<string>;
 
   /**
    * `kind` is `highEntropy` or `passphrase`. A high-entropy factor arrives as a buffer
    * `token`; a passphrase is inherently a string, so there is nothing to gain by tokenizing it.
    */
-  enroll(kind: string, token: number, passphrase: string): Promise<void>;
+  enroll(vaultId: string, kind: string, token: number, passphrase: string): Promise<void>;
 
-  unlock(): Promise<void>;
-  unlockWithRecovery(): Promise<void>;
-  changeRecoveryFactor(kind: string, token: number, passphrase: string): Promise<void>;
+  unlock(vaultId: string): Promise<void>;
+  unlockWithRecovery(vaultId: string): Promise<void>;
+  changeRecoveryFactor(
+    vaultId: string,
+    kind: string,
+    token: number,
+    passphrase: string,
+  ): Promise<void>;
 
   /** `token` names bytes already handed to the JSI buffer registry. */
-  put(recordId: string, token: number): Promise<void>;
+  put(vaultId: string, recordId: string, token: number): Promise<void>;
   /** Returns a token to redeem for an `ArrayBuffer`, or `0` for a missing record. */
-  get(recordId: string): Promise<number>;
-  remove(recordId: string): Promise<void>;
-  list(prefix: string): Promise<string[]>;
+  get(vaultId: string, recordId: string): Promise<number>;
+  remove(vaultId: string, recordId: string): Promise<void>;
+  list(vaultId: string, prefix: string): Promise<string[]>;
 
-  lock(): Promise<void>;
-  destroyVault(): Promise<void>;
-  securityInfo(): Promise<string>;
+  lock(vaultId: string): Promise<void>;
+  destroyVault(vaultId: string): Promise<void>;
+  securityInfo(vaultId: string): Promise<string>;
 
   /**
    * Hand a provider callback's outcome back to native code.

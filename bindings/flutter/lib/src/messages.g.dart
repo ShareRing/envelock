@@ -57,7 +57,7 @@ enum WireVaultState {
   needsRecovery,
 }
 
-/// How a provider rejected (spec §7.4).
+/// How a provider rejected (spec 7.4).
 ///
 /// Only [denied] counts toward lockout. Anything unrecognised is treated as [unavailable]:
 /// retryable, because a flaky network must never march a legitimate user toward lockout.
@@ -118,6 +118,33 @@ class WireVaultConfig {
   }
 }
 
+class WireVaultHandle {
+  WireVaultHandle({
+    required this.vaultId,
+    required this.directory,
+  });
+
+  String vaultId;
+
+  /// The resolved storage directory.
+  String directory;
+
+  Object encode() {
+    return <Object?>[
+      vaultId,
+      directory,
+    ];
+  }
+
+  static WireVaultHandle decode(Object result) {
+    result as List<Object?>;
+    return WireVaultHandle(
+      vaultId: result[0]! as String,
+      directory: result[1]! as String,
+    );
+  }
+}
+
 class WireStateResult {
   WireStateResult({
     required this.state,
@@ -146,11 +173,14 @@ class WireStateResult {
 
 class WireMaterialContext {
   WireMaterialContext({
+    required this.vaultId,
     required this.requestId,
     required this.reason,
     required this.nonce,
     required this.deadlineMs,
   });
+
+  String vaultId;
 
   String requestId;
 
@@ -164,6 +194,7 @@ class WireMaterialContext {
 
   Object encode() {
     return <Object?>[
+      vaultId,
       requestId,
       reason,
       nonce,
@@ -174,10 +205,11 @@ class WireMaterialContext {
   static WireMaterialContext decode(Object result) {
     result as List<Object?>;
     return WireMaterialContext(
-      requestId: result[0]! as String,
-      reason: result[1]! as WireMaterialReason,
-      nonce: result[2]! as Uint8List,
-      deadlineMs: result[3]! as int,
+      vaultId: result[0]! as String,
+      requestId: result[1]! as String,
+      reason: result[2]! as WireMaterialReason,
+      nonce: result[3]! as Uint8List,
+      deadlineMs: result[4]! as int,
     );
   }
 }
@@ -229,10 +261,10 @@ class WireRecoveryFactor {
     this.passphrase,
   });
 
-  /// 32 uniform bytes — a BIP-85 child key from the wallet seed, or equivalent.
+  /// 32 uniform bytes - a BIP-85 child key from the wallet seed, or equivalent.
   Uint8List? highEntropyBytes;
 
-  /// A user-chosen passphrase. **Not** the host app's PIN (spec §0).
+  /// A user-chosen passphrase. **Not** the host app's PIN (spec 0).
   String? passphrase;
 
   Object encode() {
@@ -263,7 +295,7 @@ class WireSecurityInfo {
     this.materialCachedUntil,
   });
 
-  /// Reported truthfully. `software` means the spec §2.3 security floor does not hold.
+  /// Reported truthfully. `software` means the spec 2.3 security floor does not hold.
   WireHardwareBacking hardwareBacking;
 
   String providerId;
@@ -393,23 +425,26 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is WireVaultConfig) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    }    else if (value is WireStateResult) {
+    }    else if (value is WireVaultHandle) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    }    else if (value is WireMaterialContext) {
+    }    else if (value is WireStateResult) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    }    else if (value is WireKeyMaterial) {
+    }    else if (value is WireMaterialContext) {
       buffer.putUint8(138);
       writeValue(buffer, value.encode());
-    }    else if (value is WireRecoveryFactor) {
+    }    else if (value is WireKeyMaterial) {
       buffer.putUint8(139);
       writeValue(buffer, value.encode());
-    }    else if (value is WireSecurityInfo) {
+    }    else if (value is WireRecoveryFactor) {
       buffer.putUint8(140);
       writeValue(buffer, value.encode());
-    }    else if (value is WireSecurityEvent) {
+    }    else if (value is WireSecurityInfo) {
       buffer.putUint8(141);
+      writeValue(buffer, value.encode());
+    }    else if (value is WireSecurityEvent) {
+      buffer.putUint8(142);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -440,16 +475,18 @@ class _PigeonCodec extends StandardMessageCodec {
       case 135: 
         return WireVaultConfig.decode(readValue(buffer)!);
       case 136: 
-        return WireStateResult.decode(readValue(buffer)!);
+        return WireVaultHandle.decode(readValue(buffer)!);
       case 137: 
-        return WireMaterialContext.decode(readValue(buffer)!);
+        return WireStateResult.decode(readValue(buffer)!);
       case 138: 
-        return WireKeyMaterial.decode(readValue(buffer)!);
+        return WireMaterialContext.decode(readValue(buffer)!);
       case 139: 
-        return WireRecoveryFactor.decode(readValue(buffer)!);
+        return WireKeyMaterial.decode(readValue(buffer)!);
       case 140: 
-        return WireSecurityInfo.decode(readValue(buffer)!);
+        return WireRecoveryFactor.decode(readValue(buffer)!);
       case 141: 
+        return WireSecurityInfo.decode(readValue(buffer)!);
+      case 142: 
         return WireSecurityEvent.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -471,8 +508,8 @@ class EnvelockHostApi {
 
   final String pigeonVar_messageChannelSuffix;
 
-  /// Create the vault. Returns the resolved storage directory.
-  Future<String> create(WireVaultConfig config) async {
+  /// Create a vault. Returns the id every later call uses to name it.
+  Future<WireVaultHandle> create(WireVaultConfig config) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.create$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -495,11 +532,11 @@ class EnvelockHostApi {
         message: 'Host platform returned null value for non-null return value.',
       );
     } else {
-      return (pigeonVar_replyList[0] as String?)!;
+      return (pigeonVar_replyList[0] as WireVaultHandle?)!;
     }
   }
 
-  Future<void> dispose() async {
+  Future<void> dispose(String vaultId) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.dispose$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -507,7 +544,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(null) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -521,7 +558,7 @@ class EnvelockHostApi {
     }
   }
 
-  Future<WireStateResult> state() async {
+  Future<WireStateResult> state(String vaultId) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.state$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -529,7 +566,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(null) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -548,7 +585,7 @@ class EnvelockHostApi {
     }
   }
 
-  Future<void> enroll(WireRecoveryFactor factor) async {
+  Future<void> enroll(String vaultId, WireRecoveryFactor factor) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.enroll$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -556,7 +593,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(<Object?>[factor]) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId, factor]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -570,8 +607,8 @@ class EnvelockHostApi {
     }
   }
 
-  /// Primary path: one OS biometric prompt, cached material, works offline (spec §8.2).
-  Future<void> unlock() async {
+  /// Primary path: one OS biometric prompt, cached material, works offline (spec 8.2).
+  Future<void> unlock(String vaultId) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.unlock$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -579,7 +616,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(null) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -594,8 +631,8 @@ class EnvelockHostApi {
   }
 
   /// Recovery path. Provisions a fresh enclave key and rewraps the primary path in the same
-  /// operation, so the next unlock is biometric-only (spec §8.4).
-  Future<void> unlockWithRecovery() async {
+  /// operation, so the next unlock is biometric-only (spec 8.4).
+  Future<void> unlockWithRecovery(String vaultId) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.unlockWithRecovery$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -603,7 +640,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(null) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -617,7 +654,7 @@ class EnvelockHostApi {
     }
   }
 
-  Future<void> changeRecoveryFactor(WireRecoveryFactor factor) async {
+  Future<void> changeRecoveryFactor(String vaultId, WireRecoveryFactor factor) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.changeRecoveryFactor$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -625,7 +662,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(<Object?>[factor]) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId, factor]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -639,7 +676,7 @@ class EnvelockHostApi {
     }
   }
 
-  Future<void> put(String recordId, Uint8List value) async {
+  Future<void> put(String vaultId, String recordId, Uint8List value) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.put$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -647,7 +684,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(<Object?>[recordId, value]) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId, recordId, value]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -661,7 +698,7 @@ class EnvelockHostApi {
     }
   }
 
-  Future<Uint8List?> get(String recordId) async {
+  Future<Uint8List?> get(String vaultId, String recordId) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.get$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -669,7 +706,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(<Object?>[recordId]) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId, recordId]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -683,7 +720,7 @@ class EnvelockHostApi {
     }
   }
 
-  Future<void> delete(String recordId) async {
+  Future<void> delete(String vaultId, String recordId) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.delete$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -691,7 +728,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(<Object?>[recordId]) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId, recordId]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -705,7 +742,7 @@ class EnvelockHostApi {
     }
   }
 
-  Future<List<String>> list(String prefix) async {
+  Future<List<String>> list(String vaultId, String prefix) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.list$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -713,7 +750,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(<Object?>[prefix]) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId, prefix]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -732,8 +769,8 @@ class EnvelockHostApi {
     }
   }
 
-  /// Zeroize the in-memory DEK. Call from `AppLifecycleState.paused` (spec §11.3).
-  Future<void> lock() async {
+  /// Zeroize the in-memory DEK. Call from `AppLifecycleState.paused` (spec 11.3).
+  Future<void> lock(String vaultId) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.lock$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -741,7 +778,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(null) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -756,7 +793,7 @@ class EnvelockHostApi {
   }
 
   /// Irreversible: deletes the enclave key, envelope, cache and every record.
-  Future<void> destroyVault() async {
+  Future<void> destroyVault(String vaultId) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.destroyVault$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -764,7 +801,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(null) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -778,7 +815,7 @@ class EnvelockHostApi {
     }
   }
 
-  Future<WireSecurityInfo> securityInfo() async {
+  Future<WireSecurityInfo> securityInfo(String vaultId) async {
     final String pigeonVar_channelName = 'dev.flutter.pigeon.envelock.EnvelockHostApi.securityInfo$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
@@ -786,7 +823,7 @@ class EnvelockHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(null) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[vaultId]) as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {
@@ -843,9 +880,9 @@ abstract class EnvelockFlutterApi {
 
   void onKeyMaterialRequested(WireMaterialContext ctx);
 
-  void onRecoveryFactorRequested(String requestId, WireRecoveryReason reason);
+  void onRecoveryFactorRequested(String vaultId, String requestId, WireRecoveryReason reason);
 
-  void onSecurityEvent(WireSecurityEvent event);
+  void onSecurityEvent(String vaultId, WireSecurityEvent event);
 
   static void setUp(EnvelockFlutterApi? api, {BinaryMessenger? binaryMessenger, String messageChannelSuffix = '',}) {
     messageChannelSuffix = messageChannelSuffix.isNotEmpty ? '.$messageChannelSuffix' : '';
@@ -885,14 +922,17 @@ abstract class EnvelockFlutterApi {
           assert(message != null,
           'Argument for dev.flutter.pigeon.envelock.EnvelockFlutterApi.onRecoveryFactorRequested was null.');
           final List<Object?> args = (message as List<Object?>?)!;
-          final String? arg_requestId = (args[0] as String?);
+          final String? arg_vaultId = (args[0] as String?);
+          assert(arg_vaultId != null,
+              'Argument for dev.flutter.pigeon.envelock.EnvelockFlutterApi.onRecoveryFactorRequested was null, expected non-null String.');
+          final String? arg_requestId = (args[1] as String?);
           assert(arg_requestId != null,
               'Argument for dev.flutter.pigeon.envelock.EnvelockFlutterApi.onRecoveryFactorRequested was null, expected non-null String.');
-          final WireRecoveryReason? arg_reason = (args[1] as WireRecoveryReason?);
+          final WireRecoveryReason? arg_reason = (args[2] as WireRecoveryReason?);
           assert(arg_reason != null,
               'Argument for dev.flutter.pigeon.envelock.EnvelockFlutterApi.onRecoveryFactorRequested was null, expected non-null WireRecoveryReason.');
           try {
-            api.onRecoveryFactorRequested(arg_requestId!, arg_reason!);
+            api.onRecoveryFactorRequested(arg_vaultId!, arg_requestId!, arg_reason!);
             return wrapResponse(empty: true);
           } on PlatformException catch (e) {
             return wrapResponse(error: e);
@@ -913,11 +953,14 @@ abstract class EnvelockFlutterApi {
           assert(message != null,
           'Argument for dev.flutter.pigeon.envelock.EnvelockFlutterApi.onSecurityEvent was null.');
           final List<Object?> args = (message as List<Object?>?)!;
-          final WireSecurityEvent? arg_event = (args[0] as WireSecurityEvent?);
+          final String? arg_vaultId = (args[0] as String?);
+          assert(arg_vaultId != null,
+              'Argument for dev.flutter.pigeon.envelock.EnvelockFlutterApi.onSecurityEvent was null, expected non-null String.');
+          final WireSecurityEvent? arg_event = (args[1] as WireSecurityEvent?);
           assert(arg_event != null,
               'Argument for dev.flutter.pigeon.envelock.EnvelockFlutterApi.onSecurityEvent was null, expected non-null WireSecurityEvent.');
           try {
-            api.onSecurityEvent(arg_event!);
+            api.onSecurityEvent(arg_vaultId!, arg_event!);
             return wrapResponse(empty: true);
           } on PlatformException catch (e) {
             return wrapResponse(error: e);

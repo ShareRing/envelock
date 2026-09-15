@@ -79,11 +79,15 @@ function toVaultError(e: unknown): VaultError {
 }
 
 export class Vault {
-  private readonly subscriptions: { remove(): void }[] = [];
   private appStateSub: { remove(): void } | undefined;
 
+  private static readonly open = new Map<string, Vault>();
+  private static listeners: { remove(): void }[] = [];
+
+
   private constructor(
-    private readonly options: VaultOptions,
+    readonly options: VaultOptions,
+    private readonly vaultId: string,
     readonly directory: string,
   ) {}
 
@@ -104,9 +108,9 @@ export class Vault {
     // Must happen before anything sends or receives bytes.
     installJSI();
 
-    const emitter = new NativeEventEmitter(NativeModules.RNEnvelock);
+    Vault.installRouter();
 
-    const directory = await NativeEnvelock.create({
+    const handle = await NativeEnvelock.create({
       providerId: options.providerId,
       directory: options.directory ?? null,
       autoLockMs: options.autoLockMs ?? 300_000,
@@ -115,41 +119,64 @@ export class Vault {
         options.destroyAfterAttempts === undefined ? 11 : options.destroyAfterAttempts,
     });
 
-    const vault = new Vault(options, directory);
+    // `<vaultId> <directory>`. A directory may contain spaces; a vault id may not, so split
+    // once from the left and keep the rest whole.
+    const gap = handle.indexOf(' ');
+    const vaultId = handle.slice(0, gap);
+    const vault = new Vault(options, vaultId, handle.slice(gap + 1));
 
-    vault.subscriptions.push(
+    Vault.open.set(vaultId, vault);
+
+    vault.appStateSub = AppState.addEventListener('change', (status: AppStateStatus) => {
+      if (status === 'background') void vault.lock().catch(() => {});
+    });
+
+    return vault;
+  }
+
+  private static installRouter(): void {
+    if (Vault.listeners.length > 0) return;
+
+    const emitter = new NativeEventEmitter(NativeModules.RNEnvelock);
+
+    Vault.listeners.push(
       onNativeEvent<{
+        vaultId: string;
         requestId: string;
         reason: MaterialReason;
         nonceToken: number;
         deadlineMs: number;
       }>(emitter, EVENT_KEY_MATERIAL, (e) => {
-          void vault.serve(e.requestId, async () => {
-            const result = await options.getKeyMaterial({
-              reason: e.reason,
-              nonce: takeBuffer(e.nonceToken),
-              deadlineMs: e.deadlineMs,
-            });
-            return {
-              token: putBuffer(result.material),
-              // Packed into the text field so native can rebuild the record in one round trip.
-              text: [
-                result.keyId,
-                result.cacheable ?? true,
-                result.cacheTtlMs ?? 30 * 24 * 60 * 60 * 1000,
-              ].join(' '),
-            };
+        const vault = Vault.open.get(e.vaultId);
+        if (!vault) return Vault.abandon(e.requestId);
+        void vault.serve(e.requestId, async () => {
+          const result = await vault.options.getKeyMaterial({
+            reason: e.reason,
+            nonce: takeBuffer(e.nonceToken),
+            deadlineMs: e.deadlineMs,
           });
+          return {
+            token: putBuffer(result.material),
+            // Packed into the text field so native can rebuild the record in one round trip.
+            text: [
+              result.keyId,
+              result.cacheable ?? true,
+              result.cacheTtlMs ?? 30 * 24 * 60 * 60 * 1000,
+            ].join(' '),
+          };
+        });
       }),
     );
 
-    vault.subscriptions.push(
-      onNativeEvent<{ requestId: string; reason: RecoveryReason }>(
+    Vault.listeners.push(
+      onNativeEvent<{ vaultId: string; requestId: string; reason: RecoveryReason }>(
         emitter,
         EVENT_RECOVERY,
         (e) => {
+          const vault = Vault.open.get(e.vaultId);
+          if (!vault) return Vault.abandon(e.requestId);
           void vault.serve(e.requestId, async () => {
-            const factor = await options.getRecoveryFactor(e.reason);
+            const factor = await vault.options.getRecoveryFactor(e.reason);
             return factor.kind === 'highEntropy'
               ? { token: putBuffer(factor.bytes), text: 'highEntropy' }
               : { token: 0, text: `passphrase ${factor.value}` };
@@ -158,22 +185,21 @@ export class Vault {
       ),
     );
 
-    if (options.onSecurityEvent) {
-      const handler = options.onSecurityEvent.bind(options);
-      vault.subscriptions.push(
-        onNativeEvent<SecurityEvent>(emitter, EVENT_SECURITY, handler),
-      );
-    }
+    Vault.listeners.push(
+      onNativeEvent<SecurityEvent & { vaultId: string }>(emitter, EVENT_SECURITY, (e) => {
+        Vault.open.get(e.vaultId)?.options.onSecurityEvent?.(e);
+      }),
+    );
+  }
 
-    // `background`, not `!== 'active'`. iOS reports `inactive` for the OS biometric sheet, the
-    // app switcher and Control Centre, all of which happen while the app is still in use - and
-    // the biometric sheet is raised by `unlock()` itself, so locking there zeroizes the DEK the
-    // user just authenticated for and the next read fails with "vault is locked".
-    vault.appStateSub = AppState.addEventListener('change', (status: AppStateStatus) => {
-      if (status === 'background') void vault.lock();
-    });
-
-    return vault;
+  private static abandon(requestId: string): void {
+    NativeEnvelock.resolveCallback(
+      requestId,
+      0,
+      '',
+      'unavailable',
+      'the vault was disposed while its provider callback was in flight',
+    );
   }
 
   /**
@@ -182,7 +208,7 @@ export class Vault {
    * Native is blocking a background thread on this, so it must always resolve exactly once -
    * including when the user's callback throws something that is not a `VaultError`.
    */
-  private async serve(
+  async serve(
     requestId: string,
     run: () => Promise<{ token: number; text: string }>,
   ): Promise<void> {
@@ -201,7 +227,7 @@ export class Vault {
   }
 
   async state(): Promise<VaultState> {
-    const raw = await NativeEnvelock.state();
+    const raw = await this.call(() => NativeEnvelock.state(this.vaultId));
     if (raw.startsWith('locked_out:')) {
       return { state: 'locked_out', untilMs: Number(raw.slice('locked_out:'.length)) };
     }
@@ -211,13 +237,13 @@ export class Vault {
   /** Enroll. Prompts once for enclave consent, then fetches material. */
   enroll(factor: RecoveryFactor): Promise<void> {
     return this.withFactor(factor, (kind, token, passphrase) =>
-      NativeEnvelock.enroll(kind, token, passphrase),
+      NativeEnvelock.enroll(this.vaultId, kind, token, passphrase),
     );
   }
 
   /** Primary path: one OS biometric prompt, cached material, works offline (spec 8.2). */
   unlock(): Promise<void> {
-    return this.call(() => NativeEnvelock.unlock());
+    return this.call(() => NativeEnvelock.unlock(this.vaultId));
   }
 
   /**
@@ -225,19 +251,19 @@ export class Vault {
    * operation, so the *next* unlock is biometric-only (spec 8.4).
    */
   unlockWithRecovery(): Promise<void> {
-    return this.call(() => NativeEnvelock.unlockWithRecovery());
+    return this.call(() => NativeEnvelock.unlockWithRecovery(this.vaultId));
   }
 
   changeRecoveryFactor(factor: RecoveryFactor): Promise<void> {
     return this.withFactor(factor, (kind, token, passphrase) =>
-      NativeEnvelock.changeRecoveryFactor(kind, token, passphrase),
+      NativeEnvelock.changeRecoveryFactor(this.vaultId, kind, token, passphrase),
     );
   }
 
   async put(recordId: string, value: Uint8Array): Promise<void> {
     const token = putBuffer(value);
     try {
-      await this.call(() => NativeEnvelock.put(recordId, token));
+      await this.call(() => NativeEnvelock.put(this.vaultId, recordId, token));
     } catch (e) {
       // Native consumes the token on success. On failure it may not have, so release it.
       dropBuffer(token);
@@ -246,43 +272,48 @@ export class Vault {
   }
 
   async get(recordId: string): Promise<Uint8Array | null> {
-    const token = await this.call(() => NativeEnvelock.get(recordId));
+    const token = await this.call(() => NativeEnvelock.get(this.vaultId, recordId));
     return token === 0 ? null : takeBuffer(token);
   }
 
   delete(recordId: string): Promise<void> {
-    return this.call(() => NativeEnvelock.remove(recordId));
+    return this.call(() => NativeEnvelock.remove(this.vaultId, recordId));
   }
 
   list(prefix = ''): Promise<string[]> {
-    return this.call(() => NativeEnvelock.list(prefix));
+    return this.call(() => NativeEnvelock.list(this.vaultId, prefix));
   }
 
   /** Zeroize the in-memory DEK. Called automatically when the app backgrounds. */
   lock(): Promise<void> {
-    return this.call(() => NativeEnvelock.lock());
+    return this.call(() => NativeEnvelock.lock(this.vaultId));
   }
 
   /** Irreversible: deletes the enclave key, envelope, cache and every record. */
   destroy(): Promise<void> {
-    return this.call(() => NativeEnvelock.destroyVault());
+    return this.call(() => NativeEnvelock.destroyVault(this.vaultId));
   }
 
   async securityInfo(): Promise<SecurityInfo> {
-    const raw = await this.call(() => NativeEnvelock.securityInfo());
+    const raw = await this.call(() => NativeEnvelock.securityInfo(this.vaultId));
     const parsed = JSON.parse(raw) as SecurityInfo & { hardwareBacking: HardwareBacking };
     return parsed;
   }
 
-  /** Detach listeners. Call when tearing the vault down; it does not delete any data. */
   async dispose(): Promise<void> {
     this.appStateSub?.remove();
     this.appStateSub = undefined;
-    for (const s of this.subscriptions.splice(0)) s.remove();
-    await NativeEnvelock.destroyInstance();
+    if (!Vault.open.delete(this.vaultId)) return;
+    await NativeEnvelock.destroyInstance(this.vaultId);
   }
 
   private async call<T>(fn: () => Promise<T>): Promise<T> {
+    if (!Vault.open.has(this.vaultId)) {
+      throw new VaultError(
+        'misconfigured',
+        'this vault has been disposed; create a new one rather than reusing the instance',
+      );
+    }
     try {
       return await fn();
     } catch (e) {

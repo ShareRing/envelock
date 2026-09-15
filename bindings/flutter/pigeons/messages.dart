@@ -69,6 +69,15 @@ class WireVaultConfig {
   int? destroyAfterAttempts;
 }
 
+class WireVaultHandle {
+  WireVaultHandle({required this.vaultId, required this.directory});
+
+  String vaultId;
+
+  /// The resolved storage directory.
+  String directory;
+}
+
 class WireStateResult {
   WireStateResult({required this.state, this.lockedUntilMs});
 
@@ -78,12 +87,14 @@ class WireStateResult {
 
 class WireMaterialContext {
   WireMaterialContext({
+    required this.vaultId,
     required this.requestId,
     required this.reason,
     required this.nonce,
     required this.deadlineMs,
   });
 
+  String vaultId;
   String requestId;
   WireMaterialReason reason;
 
@@ -170,53 +181,53 @@ class WireSecurityEvent {
 /// Dart calls native.
 @HostApi()
 abstract class EnvelockHostApi {
-  /// Create the vault. Returns the resolved storage directory.
+  /// Create a vault. Returns the id every later call uses to name it.
   @async
-  String create(WireVaultConfig config);
+  WireVaultHandle create(WireVaultConfig config);
 
   @async
-  void dispose();
+  void dispose(String vaultId);
 
   @async
-  WireStateResult state();
+  WireStateResult state(String vaultId);
 
   @async
-  void enroll(WireRecoveryFactor factor);
+  void enroll(String vaultId, WireRecoveryFactor factor);
 
   /// Primary path: one OS biometric prompt, cached material, works offline (spec 8.2).
   @async
-  void unlock();
+  void unlock(String vaultId);
 
   /// Recovery path. Provisions a fresh enclave key and rewraps the primary path in the same
   /// operation, so the next unlock is biometric-only (spec 8.4).
   @async
-  void unlockWithRecovery();
+  void unlockWithRecovery(String vaultId);
 
   @async
-  void changeRecoveryFactor(WireRecoveryFactor factor);
+  void changeRecoveryFactor(String vaultId, WireRecoveryFactor factor);
 
   @async
-  void put(String recordId, Uint8List value);
+  void put(String vaultId, String recordId, Uint8List value);
 
   @async
-  Uint8List? get(String recordId);
+  Uint8List? get(String vaultId, String recordId);
 
   @async
-  void delete(String recordId);
+  void delete(String vaultId, String recordId);
 
   @async
-  List<String> list(String prefix);
+  List<String> list(String vaultId, String prefix);
 
   /// Zeroize the in-memory DEK. Call from `AppLifecycleState.paused` (spec 11.3).
   @async
-  void lock();
+  void lock(String vaultId);
 
   /// Irreversible: deletes the enclave key, envelope, cache and every record.
   @async
-  void destroyVault();
+  void destroyVault(String vaultId);
 
   @async
-  WireSecurityInfo securityInfo();
+  WireSecurityInfo securityInfo(String vaultId);
 
   /// Hand a provider callback's outcome back to native code.
   ///
@@ -240,6 +251,10 @@ abstract class EnvelockHostApi {
 @FlutterApi()
 abstract class EnvelockFlutterApi {
   void onKeyMaterialRequested(WireMaterialContext ctx);
-  void onRecoveryFactorRequested(String requestId, WireRecoveryReason reason);
-  void onSecurityEvent(WireSecurityEvent event);
+  void onRecoveryFactorRequested(
+    String vaultId,
+    String requestId,
+    WireRecoveryReason reason,
+  );
+  void onSecurityEvent(String vaultId, WireSecurityEvent event);
 }

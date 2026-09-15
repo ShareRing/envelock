@@ -16,7 +16,13 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, kIsWeb;
+    show
+        ErrorDescription,
+        FlutterError,
+        FlutterErrorDetails,
+        TargetPlatform,
+        defaultTargetPlatform,
+        kIsWeb;
 import 'package:flutter/widgets.dart';
 
 import 'src/messages.g.dart';
@@ -280,14 +286,22 @@ class VaultOptions {
 /// reference gives no guarantee the key bytes ever leave memory, because Dart offers no
 /// control over the garbage collector (spec 11.3).
 class Vault {
-  Vault._(this._api, this.directory);
+  Vault._(this._api, this._vaultId, this.directory);
 
   final EnvelockHostApi _api;
+
+  /// Names this vault on every call. The plugin holds a map, so several vaults coexist.
+  final String _vaultId;
 
   /// The resolved storage directory.
   final String directory;
 
   _LifecycleObserver? _observer;
+  bool _disposed = false;
+
+  static final Map<String, VaultOptions> _open = {};
+  static bool _routerInstalled = false;
+
 
   static Future<Vault> open(VaultOptions options) async {
     // First, so web and desktop get a named reason instead of an opaque channel error.
@@ -296,7 +310,12 @@ class Vault {
     WidgetsFlutterBinding.ensureInitialized();
 
     final api = EnvelockHostApi();
-    final directory = await _guard(
+    if (!_routerInstalled) {
+      EnvelockFlutterApi.setUp(_CallbackRouter(api));
+      _routerInstalled = true;
+    }
+
+    final handle = await _guard(
       () => api.create(
         WireVaultConfig(
           providerId: options.providerId,
@@ -308,17 +327,27 @@ class Vault {
       ),
     );
 
-    final vault = Vault._(api, directory);
-    EnvelockFlutterApi.setUp(_CallbackHandler(api, options));
+    _open[handle.vaultId] = options;
 
+    final vault = Vault._(api, handle.vaultId, handle.directory);
     vault._observer = _LifecycleObserver(vault);
     WidgetsBinding.instance.addObserver(vault._observer!);
 
     return vault;
   }
 
+  EnvelockHostApi get _live {
+    if (_disposed) {
+      throw const VaultException(
+        VaultErrorCode.misconfigured,
+        'this vault has been disposed; open a new one rather than reusing the instance',
+      );
+    }
+    return _api;
+  }
+
   Future<VaultState> state() async {
-    final r = await _guard(() => _api.state());
+    final r = await _guard(() => _live.state(_vaultId));
     return switch (r.state) {
       WireVaultState.notEnrolled => const NotEnrolled(),
       WireVaultState.locked => const Locked(),
@@ -329,35 +358,35 @@ class Vault {
   }
 
   Future<void> enroll(RecoveryFactor factor) =>
-      _guard(() => _api.enroll(_encodeFactor(factor)));
+      _guard(() => _live.enroll(_vaultId, _encodeFactor(factor)));
 
   /// Primary path: one OS biometric prompt, cached material, works offline (spec 8.2).
-  Future<void> unlock() => _guard(() => _api.unlock());
+  Future<void> unlock() => _guard(() => _live.unlock(_vaultId));
 
   /// Recovery path. Provisions a fresh enclave key and rewraps the primary path in the same
   /// operation, so the *next* unlock is biometric-only (spec 8.4).
-  Future<void> unlockWithRecovery() => _guard(() => _api.unlockWithRecovery());
+  Future<void> unlockWithRecovery() => _guard(() => _live.unlockWithRecovery(_vaultId));
 
   Future<void> changeRecoveryFactor(RecoveryFactor factor) =>
-      _guard(() => _api.changeRecoveryFactor(_encodeFactor(factor)));
+      _guard(() => _live.changeRecoveryFactor(_vaultId, _encodeFactor(factor)));
 
   Future<void> put(String recordId, Uint8List value) =>
-      _guard(() => _api.put(recordId, value));
+      _guard(() => _live.put(_vaultId, recordId, value));
 
-  Future<Uint8List?> get(String recordId) => _guard(() => _api.get(recordId));
+  Future<Uint8List?> get(String recordId) => _guard(() => _live.get(_vaultId, recordId));
 
-  Future<void> delete(String recordId) => _guard(() => _api.delete(recordId));
+  Future<void> delete(String recordId) => _guard(() => _live.delete(_vaultId, recordId));
 
-  Future<List<String>> list([String prefix = '']) => _guard(() => _api.list(prefix));
+  Future<List<String>> list([String prefix = '']) => _guard(() => _live.list(_vaultId, prefix));
 
   /// Zeroize the in-memory DEK. Called automatically when the app is paused.
-  Future<void> lock() => _guard(() => _api.lock());
+  Future<void> lock() => _guard(() => _live.lock(_vaultId));
 
   /// Irreversible: deletes the enclave key, envelope, cache and every record.
-  Future<void> destroy() => _guard(() => _api.destroyVault());
+  Future<void> destroy() => _guard(() => _live.destroyVault(_vaultId));
 
   Future<SecurityInfo> securityInfo() async {
-    final i = await _guard(() => _api.securityInfo());
+    final i = await _guard(() => _live.securityInfo(_vaultId));
     return SecurityInfo(
       hardwareBacking: i.hardwareBacking,
       providerId: i.providerId,
@@ -370,13 +399,15 @@ class Vault {
     );
   }
 
-  /// Detach the lifecycle observer and release the native vault. Deletes no data.
   Future<void> dispose() async {
     if (_observer != null) {
       WidgetsBinding.instance.removeObserver(_observer!);
       _observer = null;
     }
-    await _api.dispose();
+    if (_disposed) return;
+    _disposed = true;
+    _open.remove(_vaultId);
+    await _api.dispose(_vaultId);
   }
 
 }
@@ -469,16 +500,20 @@ class _LifecycleObserver with WidgetsBindingObserver {
 /// Native is blocking a background thread on each of these, so every request **must** be
 /// answered exactly once - including when the user's callback throws something that is not a
 /// [VaultException].
-class _CallbackHandler implements EnvelockFlutterApi {
-  _CallbackHandler(this._api, this._options);
+class _CallbackRouter implements EnvelockFlutterApi {
+  _CallbackRouter(this._api);
 
   final EnvelockHostApi _api;
-  final VaultOptions _options;
+
+  VaultOptions? _optionsFor(String vaultId) => Vault._open[vaultId];
 
   @override
   void onKeyMaterialRequested(WireMaterialContext ctx) {
+    final options = _optionsFor(ctx.vaultId);
+    if (options == null) return _abandon(ctx.vaultId, ctx.requestId);
+
     unawaited(_serve(ctx.requestId, () async {
-      final result = await _options.getKeyMaterial(
+      final result = await options.getKeyMaterial(
         MaterialContext(
           reason: ctx.reason,
           nonce: ctx.nonce,
@@ -495,9 +530,16 @@ class _CallbackHandler implements EnvelockFlutterApi {
   }
 
   @override
-  void onRecoveryFactorRequested(String requestId, WireRecoveryReason reason) {
+  void onRecoveryFactorRequested(
+    String vaultId,
+    String requestId,
+    WireRecoveryReason reason,
+  ) {
+    final options = _optionsFor(vaultId);
+    if (options == null) return _abandon(vaultId, requestId);
+
     unawaited(_serve(requestId, () async {
-      final factor = await _options.getRecoveryFactor(reason);
+      final factor = await options.getRecoveryFactor(reason);
       return switch (factor) {
         HighEntropyFactor(:final bytes) => (bytes, 'highEntropy'),
         PassphraseFactor(:final value) => (null, 'passphrase\u0000$value'),
@@ -506,8 +548,8 @@ class _CallbackHandler implements EnvelockFlutterApi {
   }
 
   @override
-  void onSecurityEvent(WireSecurityEvent event) {
-    _options.onSecurityEvent?.call(SecurityEvent(event.type, {
+  void onSecurityEvent(String vaultId, WireSecurityEvent event) {
+    _optionsFor(vaultId)?.onSecurityEvent?.call(SecurityEvent(event.type, {
       'hardware': event.hardware,
       'usedCache': event.usedCache,
       'counted': event.counted,
@@ -516,6 +558,24 @@ class _CallbackHandler implements EnvelockFlutterApi {
       'reason': event.reason,
       'untilMs': event.untilMs,
     }..removeWhere((_, v) => v == null)));
+  }
+
+  void _abandon(String vaultId, String requestId) {
+    FlutterError.reportError(FlutterErrorDetails(
+      exception: StateError(
+        'envelock: a provider callback arrived for vault "$vaultId", which is not open. '
+        'Open vaults: ${Vault._open.keys.toList()}. Answering `unavailable`.',
+      ),
+      library: 'envelock',
+      context: ErrorDescription('routing a provider callback'),
+    ));
+    unawaited(_api.resolveCallback(
+      requestId,
+      null,
+      null,
+      WireErrorCode.unavailable,
+      'the vault was disposed while its provider callback was in flight',
+    ));
   }
 
   Future<void> _serve(
@@ -533,8 +593,15 @@ class _CallbackHandler implements EnvelockFlutterApi {
         _toWireCode(e.code),
         e.message ?? e.code.name,
       );
-    } catch (e) {
-      // An arbitrary Dart error is retryable and uncounted, never a denial (spec 7.4).
+    } catch (e, stack) {
+      FlutterError.reportError(FlutterErrorDetails(
+        exception: e,
+        stack: stack,
+        library: 'envelock',
+        context: ErrorDescription(
+          'serving a provider callback; envelock reports this as `unavailable`',
+        ),
+      ));
       await _api.resolveCallback(
         requestId,
         null,

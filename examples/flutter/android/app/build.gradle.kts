@@ -20,7 +20,7 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         // envelock needs API 23 for setUserAuthenticationRequired.
-        minSdk = flutter.minSdkVersion
+        minSdk = 28
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

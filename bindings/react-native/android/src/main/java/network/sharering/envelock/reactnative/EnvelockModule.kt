@@ -52,9 +52,13 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     private val executor = Executors.newCachedThreadPool()
-    private val pending = ConcurrentHashMap<String, SynchronousQueue<CallbackResult>>()
+    private val pending = ConcurrentHashMap<String, Waiter>()
 
-    @Volatile private var vault: FfiVault? = null
+    private val vaults = ConcurrentHashMap<String, FfiVault>()
+
+    private class Waiter(val vaultId: String) {
+        val queue = SynchronousQueue<CallbackResult>()
+    }
 
     override fun getName() = "RNEnvelock"
 
@@ -127,27 +131,25 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
                     else null
             )
 
-            vault = FfiVault(
+            val vaultId = UUID.randomUUID().toString()
+            vaults[vaultId] = FfiVault(
                 vaultConfig,
                 KeystoreKeyStore(reactContext, "network.sharering.envelock.$providerId"),
-                BridgedMaterialProvider(),
-                BridgedRecoveryProvider(),
-                BridgedEventSink(),
+                BridgedMaterialProvider(vaultId),
+                BridgedRecoveryProvider(vaultId),
+                BridgedEventSink(vaultId),
             )
-            promise.resolve(directory.absolutePath)
+            promise.resolve("$vaultId ${directory.absolutePath}")
         } catch (e: Throwable) {
             reject(promise, e)
         }
     }
 
     @ReactMethod
-    fun destroyInstance(promise: Promise) = executor.execute {
-        vault?.lock()
-        vault = null
-        // Every in-flight waiter must be released, or its thread blocks until timeout holding
-        // whatever the Rust core was doing.
-        pending.keys.toList().forEach {
-            pending.remove(it)?.offer(
+    fun destroyInstance(vaultId: String, promise: Promise) = executor.execute {
+        vaults.remove(vaultId)?.lock()
+        pending.entries.filter { it.value.vaultId == vaultId }.forEach { (id, _) ->
+            pending.remove(id)?.queue?.offer(
                 CallbackResult(null, "", "unavailable", "the vault was disposed")
             )
         }
@@ -159,7 +161,7 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
     // -----------------------------------------------------------------------------------
 
     @ReactMethod
-    fun state(promise: Promise) = run(promise) { v ->
+    fun state(vaultId: String, promise: Promise) = run(vaultId, promise) { v ->
         when (val s = v.state()) {
             is FfiVaultState.NotEnrolled -> "not_enrolled"
             is FfiVaultState.Locked -> "locked"
@@ -174,22 +176,34 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
      * there is nothing to gain by tokenizing it.
      */
     @ReactMethod
-    fun enroll(kind: String, token: Double, passphrase: String, promise: Promise) =
-        run(promise) { it.enroll(decodeFactor(kind, token, passphrase)); null }
+    fun enroll(
+        vaultId: String,
+        kind: String,
+        token: Double,
+        passphrase: String,
+        promise: Promise,
+    ) = run(vaultId, promise) { it.enroll(decodeFactor(kind, token, passphrase)); null }
 
     @ReactMethod
-    fun unlock(promise: Promise) = run(promise) { it.unlock(); null }
+    fun unlock(vaultId: String, promise: Promise) = run(vaultId, promise) { it.unlock(); null }
 
     @ReactMethod
-    fun unlockWithRecovery(promise: Promise) = run(promise) { it.unlockWithRecovery(); null }
+    fun unlockWithRecovery(vaultId: String, promise: Promise) =
+        run(vaultId, promise) { it.unlockWithRecovery(); null }
 
     @ReactMethod
-    fun changeRecoveryFactor(kind: String, token: Double, passphrase: String, promise: Promise) =
-        run(promise) { it.changeRecoveryFactor(decodeFactor(kind, token, passphrase)); null }
+    fun changeRecoveryFactor(
+        vaultId: String,
+        kind: String,
+        token: Double,
+        passphrase: String,
+        promise: Promise,
+    ) = run(vaultId, promise) { it.changeRecoveryFactor(decodeFactor(kind, token, passphrase)); null }
 
     /** `token` names bytes JavaScript already handed to the JSI buffer registry. */
     @ReactMethod
-    fun put(recordId: String, token: Double, promise: Promise) = run(promise) { v ->
+    fun put(vaultId: String, recordId: String, token: Double, promise: Promise) =
+        run(vaultId, promise) { v ->
         val bytes = nativeTakeBuffer(token.toLong())
             ?: throw FfiVaultException.Misconfigured("unknown or already-redeemed buffer token")
         try {
@@ -202,26 +216,28 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
 
     /** Returns a token JavaScript redeems for an `ArrayBuffer`, or `0` for a missing record. */
     @ReactMethod
-    fun get(recordId: String, promise: Promise) = run(promise) { v ->
+    fun get(vaultId: String, recordId: String, promise: Promise) = run(vaultId, promise) { v ->
         v.get(recordId)?.let { nativePutBuffer(it).toDouble() } ?: 0.0
     }
 
     @ReactMethod
-    fun remove(recordId: String, promise: Promise) = run(promise) { it.delete(recordId); null }
+    fun remove(vaultId: String, recordId: String, promise: Promise) =
+        run(vaultId, promise) { it.delete(recordId); null }
 
     @ReactMethod
-    fun list(prefix: String, promise: Promise) = run(promise) { v ->
+    fun list(vaultId: String, prefix: String, promise: Promise) = run(vaultId, promise) { v ->
         Arguments.fromList(v.list(prefix))
     }
 
     @ReactMethod
-    fun lock(promise: Promise) = run(promise) { it.lock(); null }
+    fun lock(vaultId: String, promise: Promise) = run(vaultId, promise) { it.lock(); null }
 
     @ReactMethod
-    fun destroyVault(promise: Promise) = run(promise) { it.destroyVault(); null }
+    fun destroyVault(vaultId: String, promise: Promise) =
+        run(vaultId, promise) { it.destroyVault(); null }
 
     @ReactMethod
-    fun securityInfo(promise: Promise) = run(promise) { v ->
+    fun securityInfo(vaultId: String, promise: Promise) = run(vaultId, promise) { v ->
         val i = v.securityInfo()
         JSONObject().apply {
             put("hardwareBacking", name(i.hardwareBacking))
@@ -247,15 +263,15 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
         errorCode: String,
         errorMessage: String,
     ) {
-        val queue = pending.remove(requestId)
-        if (queue == null) {
+        val waiter = pending.remove(requestId)
+        if (waiter == null) {
             // Nobody is waiting - the request timed out or the vault was disposed. The payload
             // must still be released, or an abandoned secret sits in memory until exit.
             if (token != 0.0) nativeDropBuffer(token.toLong())
             return
         }
         val bytes = if (token == 0.0) null else nativeTakeBuffer(token.toLong())
-        queue.offer(CallbackResult(bytes, text, errorCode, errorMessage))
+        waiter.queue.offer(CallbackResult(bytes, text, errorCode, errorMessage))
     }
 
     // Required by NativeEventEmitter on the JS side; the work is done by RN itself.
@@ -263,18 +279,25 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod fun removeListeners(count: Double) = Unit
 
     /** Ask JS for something and block this (background) thread until it answers. */
-    private fun askJs(event: String, body: WritableMap, timeoutMs: Long): CallbackResult {
+    private fun askJs(
+        vaultId: String,
+        event: String,
+        body: WritableMap,
+        timeoutMs: Long,
+    ): CallbackResult {
         val requestId = UUID.randomUUID().toString()
-        val queue = SynchronousQueue<CallbackResult>()
-        pending[requestId] = queue
+        val waiter = Waiter(vaultId)
+        pending[requestId] = waiter
 
         body.putString("requestId", requestId)
+        // JavaScript dispatches on this: one router for the process, not a listener per vault.
+        body.putString("vaultId", vaultId)
         reactContext
             .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
             .emit(event, body)
 
         val result = try {
-            queue.poll(timeoutMs, TimeUnit.MILLISECONDS)
+            waiter.queue.poll(timeoutMs, TimeUnit.MILLISECONDS)
         } finally {
             pending.remove(requestId)
         } ?: throw FfiVaultException.Unavailable()
@@ -299,7 +322,8 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
     // Bridged providers
     // -----------------------------------------------------------------------------------
 
-    private inner class BridgedMaterialProvider : KeyMaterialProviderFfi {
+    private inner class BridgedMaterialProvider(private val vaultId: String) :
+        KeyMaterialProviderFfi {
         override fun getKeyMaterial(ctx: FfiMaterialContext): FfiKeyMaterial {
             val body = Arguments.createMap().apply {
                 putString(
@@ -317,7 +341,8 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
 
             // A margin over envelock's own deadline: the core is the authority on timing, and
             // this only prevents a silent JS thread from wedging a native one forever.
-            val answer = askJs("envelock:getKeyMaterial", body, ctx.deadlineMs.toLong() + 5_000)
+            val answer =
+                askJs(vaultId, "envelock:getKeyMaterial", body, ctx.deadlineMs.toLong() + 5_000)
 
             // JS packs `keyId cacheable cacheTtlMs` into the text field; the material itself
             // came back as bytes.
@@ -336,7 +361,8 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
-    private inner class BridgedRecoveryProvider : RecoveryProviderFfi {
+    private inner class BridgedRecoveryProvider(private val vaultId: String) :
+        RecoveryProviderFfi {
         override fun getRecoveryFactor(reason: FfiRecoveryReason): FfiRecoveryFactor {
             val body = Arguments.createMap().apply {
                 putString(
@@ -349,7 +375,7 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
                 )
             }
             // A human is typing or approving; give them real time.
-            val answer = askJs("envelock:getRecoveryFactor", body, 300_000)
+            val answer = askJs(vaultId, "envelock:getRecoveryFactor", body, 300_000)
             val bytes = answer.bytes
             return when {
                 answer.text == "highEntropy" && bytes != null ->
@@ -363,7 +389,7 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
-    private inner class BridgedEventSink : SecurityEventSinkFfi {
+    private inner class BridgedEventSink(private val vaultId: String) : SecurityEventSinkFfi {
         override fun onEvent(event: FfiSecurityEvent) {
             val body = Arguments.createMap()
             when (event) {
@@ -406,6 +432,7 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
                     body.putString("to", name(event.to))
                 }
             }
+            body.putString("vaultId", vaultId)
             reactContext
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                 .emit("envelock:securityEvent", body)
@@ -416,11 +443,14 @@ class EnvelockModule(private val reactContext: ReactApplicationContext) :
     // Helpers
     // -----------------------------------------------------------------------------------
 
-    private fun run(promise: Promise, body: (FfiVault) -> Any?) {
+    private fun run(vaultId: String, promise: Promise, body: (FfiVault) -> Any?) {
         executor.execute {
-            val v = vault
+            val v = vaults[vaultId]
             if (v == null) {
-                promise.reject("misconfigured", "the vault has not been created")
+                promise.reject(
+                    "misconfigured",
+                    "no such vault: it was disposed, or never created",
+                )
                 return@execute
             }
             try {

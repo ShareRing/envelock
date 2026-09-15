@@ -41,6 +41,17 @@ public final class SecureEnclaveKeyStore: EnclaveKeyStoreFfi, @unchecked Sendabl
         case cryptography(String)
         case userCancelled
 
+        var asFfi: FfiVaultError {
+            switch self {
+            case .userCancelled:
+                return .Cancelled
+            case .cryptography(let m):
+                return .CorruptData(detail: m)
+            default:
+                return .Misconfigured(detail: errorDescription ?? "\(self)")
+            }
+        }
+
         public var errorDescription: String? {
             switch self {
             case .secureEnclaveUnavailable:
@@ -52,6 +63,17 @@ public final class SecureEnclaveKeyStore: EnclaveKeyStoreFfi, @unchecked Sendabl
             case .cryptography(let m): return "cryptographic operation failed: \(m)"
             case .userCancelled: return "cancelled by the user"
             }
+        }
+    }
+
+    private func mapped<T>(_ body: () throws -> T) throws -> T {
+        do {
+            return try body()
+        } catch let failure as Failure {
+            if case .userCancelled = failure {} else {
+                print("[envelock] enclave failure: \(failure.errorDescription ?? "\(failure)")")
+            }
+            throw failure.asFfi
         }
     }
 
@@ -89,6 +111,10 @@ public final class SecureEnclaveKeyStore: EnclaveKeyStoreFfi, @unchecked Sendabl
     // MARK: - EnclaveKeyStoreFfi
 
     public func createKey(vaultId: Data) throws {
+        try mapped { try createKeyUnmapped(vaultId: vaultId) }
+    }
+
+    private func createKeyUnmapped(vaultId: Data) throws {
         guard Self.isSecureEnclaveAvailable else { throw Failure.secureEnclaveUnavailable }
 
         // Idempotent: enrollment may be retried after a transient failure, and regenerating
@@ -149,6 +175,10 @@ public final class SecureEnclaveKeyStore: EnclaveKeyStoreFfi, @unchecked Sendabl
     }
 
     public func deviceSecret(vaultId: Data) throws -> Data {
+        try mapped { try deviceSecretUnmapped(vaultId: vaultId) }
+    }
+
+    private func deviceSecretUnmapped(vaultId: Data) throws -> Data {
         let context = authenticationContext()
         let privateKey = try loadPrivateKey(vaultId: vaultId, context: context)
         let sealed = try loadSealedSecret(vaultId: vaultId)
@@ -167,6 +197,10 @@ public final class SecureEnclaveKeyStore: EnclaveKeyStoreFfi, @unchecked Sendabl
     }
 
     public func keyExists(vaultId: Data) throws -> Bool {
+        try mapped { try keyExistsUnmapped(vaultId: vaultId) }
+    }
+
+    private func keyExistsUnmapped(vaultId: Data) throws -> Bool {
         // Deliberately does not authenticate: this is a status query, and it is called from
         // `state()`, which must never raise a biometric prompt. `kSecUseAuthenticationUISkip`
         // asks the keychain for the item's presence without trying to use it.
@@ -180,8 +214,10 @@ public final class SecureEnclaveKeyStore: EnclaveKeyStoreFfi, @unchecked Sendabl
     }
 
     public func deleteKey(vaultId: Data) throws {
-        deleteKeychainItems(vaultId: vaultId)
-        invalidateContext()
+        try mapped {
+            deleteKeychainItems(vaultId: vaultId)
+            invalidateContext()
+        }
     }
 
     public func hardwareBacking() -> FfiHardwareBacking {

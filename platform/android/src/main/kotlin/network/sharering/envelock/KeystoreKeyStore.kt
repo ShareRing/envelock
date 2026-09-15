@@ -1,7 +1,12 @@
 package network.sharering.envelock
 
 import android.content.Context
+import android.hardware.biometrics.BiometricManager
+import android.hardware.biometrics.BiometricPrompt
 import android.os.Build
+import android.os.CancellationSignal
+import android.os.Handler
+import android.os.Looper
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
@@ -9,6 +14,8 @@ import android.security.keystore.UserNotAuthenticatedException
 import java.io.File
 import java.security.KeyStore
 import java.security.SecureRandom
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.Executor
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -50,11 +57,13 @@ import uniffi.envelock.FfiVaultException
  * @param authValiditySeconds `0` requires authentication for every use - the strictest setting.
  *   A positive value lets one authentication cover a burst, at the cost of a window in which no
  *   prompt appears.
+ * @param promptTitle Shown in the system authentication prompt.
  */
 class KeystoreKeyStore(
     context: Context,
     private val keyAlias: String,
     private val authValiditySeconds: Int = 0,
+    private val promptTitle: String = "Unlock your secure data",
 ) : EnclaveKeyStoreFfi {
 
     private val appContext = context.applicationContext
@@ -77,21 +86,22 @@ class KeystoreKeyStore(
     // EnclaveKeyStoreFfi
     // ---------------------------------------------------------------------------------------
 
-    override fun createKey(vaultId: ByteArray) = synchronized(lock) {
-        // Idempotent: enrollment may be retried after a transient failure, and regenerating
-        // would orphan the wrapped secret and with it the user's data.
-        if (keystoreKey(vaultId) != null && wrappedFile(vaultId).exists()) return@synchronized
+    override fun createKey(vaultId: ByteArray) {
+        val key = synchronized(lock) {
+            // Idempotent: enrollment may be retried after a transient failure, and regenerating
+            // would orphan the wrapped secret and with it the user's data.
+            if (keystoreKey(vaultId) != null && wrappedFile(vaultId).exists()) return
 
-        deleteEverything(vaultId)
-        val key = generateKey(vaultId)
+            deleteEverything(vaultId)
+            generateKey(vaultId)
+        }
 
         val secret = ByteArray(SECRET_BYTES).also { SecureRandom().nextBytes(it) }
         try {
-            // Encryption uses the key without authenticating, because the key was just created
-            // in an authenticated context. Only decryption raises the prompt.
-            val cipher = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, key) }
-            val ciphertext = cipher.doFinal(secret)
-            writeAtomically(wrappedFile(vaultId), cipher.iv + ciphertext)
+            val blob = authenticated({
+                Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, key) }
+            }) { it.iv + it.doFinal(secret) }
+            writeAtomically(wrappedFile(vaultId), blob)
         } finally {
             secret.fill(0)
         }
@@ -110,9 +120,14 @@ class KeystoreKeyStore(
         val ciphertext = blob.copyOfRange(GCM_IV_BYTES, blob.size)
 
         return try {
-            Cipher.getInstance(TRANSFORMATION)
-                .apply { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv)) }
-                .doFinal(ciphertext)
+            authenticated({
+                Cipher.getInstance(TRANSFORMATION)
+                    .apply { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv)) }
+            }) { it.doFinal(ciphertext) }
+        } catch (e: FfiVaultException) {
+            // Cancelled and Misconfigured already say exactly what happened; re-reporting them
+            // as CorruptData below would turn a dismissed prompt into a data-loss message.
+            throw e
         } catch (e: UserNotAuthenticatedException) {
             // The user has not authenticated within the validity window. This is normal, and
             // must not count toward lockout (spec 7.4) - the caller re-prompts.
@@ -151,6 +166,81 @@ class KeystoreKeyStore(
     // Internals
     // ---------------------------------------------------------------------------------------
 
+    private fun <T> authenticated(newCipher: () -> Cipher, use: (Cipher) -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            // The prompt has to run on this thread, so waiting on it here would deadlock.
+            throw FfiVaultException.Misconfigured(
+                "envelock must be called off the main thread: the enclave key is gated behind a " +
+                    "biometric prompt that needs the main thread to show"
+            )
+        }
+
+        val main = Handler(Looper.getMainLooper())
+        val executor = Executor(main::post)
+        val cancel = CancellationSignal()
+        // Either the authenticated Cipher or the Throwable to raise. One slot: the framework
+        // delivers exactly one terminal callback, and `offer` drops anything after it.
+        val outcome = ArrayBlockingQueue<Result<Cipher>>(1)
+
+        // Posted to the main thread: the framework reads resources and posts UI from wherever
+        // `authenticate` is called.
+        main.post { startPrompt(newCipher, executor, cancel, outcome) }
+
+        return use(outcome.take().getOrThrow())
+    }
+
+    private fun startPrompt(
+        newCipher: () -> Cipher,
+        executor: Executor,
+        cancel: CancellationSignal,
+        outcome: ArrayBlockingQueue<Result<Cipher>>,
+    ) {
+        try {
+            val crypto = if (authValiditySeconds == 0) {
+                BiometricPrompt.CryptoObject(newCipher())
+            } else {
+                null
+            }
+
+            val builder = BiometricPrompt.Builder(appContext).setTitle(promptTitle)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                builder.setAllowedAuthenticators(
+                    BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                )
+            } else {
+                // API 28-29 cannot combine a CryptoObject with the device credential, so the
+                // prompt is biometric-only and the framework requires its own dismiss button.
+                builder.setNegativeButton("Cancel", executor) { _, _ -> cancel.cancel() }
+            }
+
+            val callback = object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(
+                    result: BiometricPrompt.AuthenticationResult
+                ) {
+                    // A rejected fingerprint calls `onAuthenticationFailed` and leaves the
+                    // prompt up, so only these two paths are terminal.
+                    outcome.offer(runCatching { result.cryptoObject?.cipher ?: newCipher() })
+                }
+
+                override fun onAuthenticationError(code: Int, message: CharSequence) {
+                    // Dismissing a prompt is normal behaviour and explicitly not a failed
+                    // attempt, so it must not count toward lockout (spec 7.4).
+                    outcome.offer(Result.failure(FfiVaultException.Cancelled()))
+                }
+            }
+
+            val prompt = builder.build()
+            if (crypto != null) {
+                prompt.authenticate(crypto, cancel, executor, callback)
+            } else {
+                prompt.authenticate(cancel, executor, callback)
+            }
+        } catch (e: Throwable) {
+            outcome.offer(Result.failure(e))
+        }
+    }
+
     private fun generateKey(vaultId: ByteArray): SecretKey {
         // StrongBox first; fall back to the TEE and report the downgrade truthfully rather than
         // claiming a posture the device does not have (spec 6.3, 6.4).
@@ -184,19 +274,15 @@ class KeystoreKeyStore(
                 KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
             )
         } else {
-            // API 23-29. `-1` means "authentication required for every use" (spec 6.3).
+            // API 28-29. `-1` means "authentication required for every use" (spec 6.3).
             builder.setUserAuthenticationValidityDurationSeconds(
                 if (authValiditySeconds == 0) -1 else authValiditySeconds
             )
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            builder.setInvalidatedByBiometricEnrollment(false)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            builder.setUnlockedDeviceRequired(true)
-            if (strongBox) builder.setIsStrongBoxBacked(true)
-        }
+        builder.setInvalidatedByBiometricEnrollment(false)
+        builder.setUnlockedDeviceRequired(true)
+        if (strongBox) builder.setIsStrongBoxBacked(true)
 
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
             .apply { init(builder.build()) }
@@ -204,10 +290,9 @@ class KeystoreKeyStore(
     }
 
     private fun supportsStrongBox(): Boolean =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-            appContext.packageManager.hasSystemFeature(
-                android.content.pm.PackageManager.FEATURE_STRONGBOX_KEYSTORE
-            )
+        appContext.packageManager.hasSystemFeature(
+            android.content.pm.PackageManager.FEATURE_STRONGBOX_KEYSTORE
+        )
 
     private fun keystoreKey(vaultId: ByteArray): SecretKey? = try {
         KeyStore.getInstance(KEYSTORE).apply { load(null) }
